@@ -3,6 +3,10 @@
 Long-term project memory for the [pi coding-agent](https://github.com/earendil-works/pi),
 backed by a local [Hindsight](https://github.com/threadway/hindsight) instance.
 
+> **Need Hindsight running first?** On macOS the fastest way to spin up a local
+> instance is [**hindsight-setup**](https://github.com/abix5/hindsight-setup) —
+> simple and quick.
+
 pi-hindsight gives the agent a durable memory of your project that survives across
 sessions and context compaction. It works in two directions:
 
@@ -69,7 +73,8 @@ write path to derail it.
 
 - **pi coding-agent** (provides the extension runtime and model registry).
 - A running **Hindsight** HTTP API — by default `http://localhost:8888`,
-  namespace `default`.
+  namespace `default`. On macOS, the easiest way to get one is
+  [**hindsight-setup**](https://github.com/abix5/hindsight-setup).
 - **bun** — the extension runs as TypeScript.
 - **jq** and **curl** on `PATH` — used by the memorize taskflow's script phases.
 - **Two models** available in your pi model registry (one cheap for
