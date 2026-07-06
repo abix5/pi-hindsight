@@ -1,0 +1,18 @@
+# dependencies
+node_modules/
+
+# runtime memory data (per-project, never published)
+.pi/hindsight/
+.pi/taskflows/runs/
+
+# subagent run artifacts
+.pi-subagents/
+
+# logs
+*.log
+
+# internal planning notes
+PLAN.md
+
+# OS
+.DS_Store

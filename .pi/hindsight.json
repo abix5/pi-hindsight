@@ -1,0 +1,11 @@
+{
+  "autoRecall": true,
+  "autoMemorize": true,
+  "memorizeEngine": "taskflow",
+  "retainModelId": "proxy/deepseek-v4-flash",
+  "recallModelId": "proxy/deepseek-v4-flash",
+  "recallOperation": "recall",
+  "recallFilter": "model",
+  "recallMaxLines": 8,
+  "recallContextTokens": 5000
+}
