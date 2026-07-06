@@ -75,6 +75,9 @@ write path to derail it.
 - A running **Hindsight** HTTP API — by default `http://localhost:8888`,
   namespace `default`. On macOS, the easiest way to get one is
   [**hindsight-setup**](https://github.com/abix5/hindsight-setup).
+  **v0.8.4+** recommended: recall uses `prefer_observations` (provenance-based
+  dedup of raw facts superseded by observations). Older servers just ignore the
+  flag — no error, but no server-side dedup either.
 - **bun** — the extension runs as TypeScript.
 - **jq** and **curl** on `PATH` — used by the memorize taskflow's script phases.
 - **Two models** available in your pi model registry (one cheap for
