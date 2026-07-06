@@ -25,7 +25,7 @@
       "run": [
         "bash",
         "-c",
-        "body=$(cat); doc=\".pi/hindsight/delta/_doc-$2.txt\"; base=\"$3\"; case \"$base\" in \"\"|\"{args.\"*) base=\"http://localhost:8888\";; esac; ns=\"$4\"; case \"$ns\" in \"\"|\"{args.\"*) ns=\"default\";; esac; if [ -z \"$body\" ] || [ \"$body\" = \"NONE\" ]; then echo NONE; exit 0; fi; printf '%s' \"$body\" > \"$doc\"; printf '%s' \"$body\" | jq -Rs '{query:.,max_tokens:1500,budget:\"mid\"}' | curl -s --fail-with-body -X POST \"$base/v1/$ns/banks/$1/memories/recall\" -H 'content-type: application/json' --data-binary @- || echo '{\"results\":[]}'",
+        "body=$(cat); doc=\".pi/hindsight/delta/_doc-$2.txt\"; base=\"$3\"; case \"$base\" in \"\"|\"{args.\"*) base=\"http://localhost:8888\";; esac; ns=\"$4\"; case \"$ns\" in \"\"|\"{args.\"*) ns=\"default\";; esac; if [ -z \"$body\" ] || [ \"$body\" = \"NONE\" ]; then echo NONE; exit 0; fi; printf '%s' \"$body\" > \"$doc\"; printf '%s' \"$body\" | jq -Rs '{query:.,max_tokens:1500,budget:\"mid\",prefer_observations:true}' | curl -s --fail-with-body -X POST \"$base/v1/$ns/banks/$1/memories/recall\" -H 'content-type: application/json' --data-binary @- || echo '{\"results\":[]}'",
         "hs",
         "{args.bank}",
         "{args.tag}",

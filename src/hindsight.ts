@@ -27,6 +27,13 @@ export interface RecallOptions {
 	budget?: Budget;
 	tags?: string[];
 	types?: string[];
+	/**
+	 * Drop raw facts that a returned observation was consolidated from, so the
+	 * same content is not returned twice (raw + observation). Provenance-based
+	 * (exact source-id membership), not semantic. Hindsight >= v0.8.4; older
+	 * servers ignore the unknown field. Defaults to true.
+	 */
+	preferObservations?: boolean;
 }
 
 /** Bank size counters shown in the status widget. */
@@ -204,6 +211,7 @@ export class HindsightClient {
 				budget: opts.budget ?? this.cfg.recallBudget,
 				tags: opts.tags,
 				types: opts.types,
+				prefer_observations: opts.preferObservations ?? true,
 			},
 			signal,
 			30000,
