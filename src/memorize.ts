@@ -724,7 +724,7 @@ export class Memorizer {
 			// shapes HOW facts are pulled from this document — the API docs call it one of
 			// the highest-leverage quality levers. Describe what the report actually is.
 			context:
-				"durable engineering memory from a coding session: decisions and rationale, constraints and preferences, verified know-how, pitfalls, and facts and locations",
+				"Curated long-term engineering notes from a pair-programming session between a software engineer and their AI coding agent on one software project. Every line is already-distilled durable knowledge, so treat each as an established fact about this project, not chit-chat or momentary state. Categories: architectural and design decisions with rationale; standing user constraints and preferences; verified know-how (commands, procedures, fixes that worked); pitfalls (approaches tried that failed, and why); and concrete facts and locations (file paths, endpoints, config keys, ports, env-var names). Record where secrets live, never their values.",
 			async: true,
 		});
 		appendDebug(cwd, "memorize.retain.done", {
