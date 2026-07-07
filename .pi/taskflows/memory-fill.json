@@ -55,7 +55,7 @@
       "run": [
         "bash",
         "-c",
-        "doc=\".pi/hindsight/delta/_doc-$2.txt\"; base=\"$3\"; case \"$base\" in \"\"|\"{args.\"*) base=\"http://localhost:8888\";; esac; ns=\"$4\"; case \"$ns\" in \"\"|\"{args.\"*) ns=\"default\";; esac; if [ ! -s \"$doc\" ]; then echo 'skipped: nothing to store'; rm -f \"$doc\"; exit 0; fi; jq -Rs --arg b \"$1\" '{items:[{content:.,tags:[$b,\"agent-summary\"]}],async:true}' \"$doc\" | curl -s --fail-with-body -X POST \"$base/v1/$ns/banks/$1/memories\" -H 'content-type: application/json' --data-binary @-; status=$?; rm -f \"$doc\"; exit $status",
+        "doc=\".pi/hindsight/delta/_doc-$2.txt\"; base=\"$3\"; case \"$base\" in \"\"|\"{args.\"*) base=\"http://localhost:8888\";; esac; ns=\"$4\"; case \"$ns\" in \"\"|\"{args.\"*) ns=\"default\";; esac; if [ ! -s \"$doc\" ]; then echo 'skipped: nothing to store'; rm -f \"$doc\"; exit 0; fi; jq -Rs --arg b \"$1\" --arg c \"durable engineering memory from a coding session: decisions and rationale, constraints and preferences, verified know-how, pitfalls, and facts and locations\" '{items:[{content:.,tags:[$b,\"agent-summary\"],context:$c}],async:true}' \"$doc\" | curl -s --fail-with-body -X POST \"$base/v1/$ns/banks/$1/memories\" -H 'content-type: application/json' --data-binary @-; status=$?; rm -f \"$doc\"; exit $status",
         "hs",
         "{args.bank}",
         "{args.tag}",

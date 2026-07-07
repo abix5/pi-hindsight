@@ -720,7 +720,11 @@ export class Memorizer {
 		// to finish processing. The widget counters refresh in the background later.
 		await this.deps.client.retain(note, {
 			tags: [cfg.bankId, "agent-summary"],
-			context: "agent-summary",
+			// `context` is injected directly into Hindsight's fact-extraction prompt and
+			// shapes HOW facts are pulled from this document — the API docs call it one of
+			// the highest-leverage quality levers. Describe what the report actually is.
+			context:
+				"durable engineering memory from a coding session: decisions and rationale, constraints and preferences, verified know-how, pitfalls, and facts and locations",
 			async: true,
 		});
 		appendDebug(cwd, "memorize.retain.done", {
