@@ -354,24 +354,26 @@ export class HindsightStatus {
 		const name = this.c("dim", this.bank.id || "(none)");
 		const counts = this.c("muted", this.counts());
 
+		const mode = this.autoMode();
+
 		if (this.bank.state === "error")
-			return `${brain} ${this.c("error", "●")} ${name} · ${this.c("error", trunc(this.bank.detail, 40))}`;
+			return `${brain} ${this.c("error", "●")} ${name} · ${mode} · ${this.c("error", trunc(this.bank.detail, 40))}`;
 		if (this.bank.state === "checking")
-			return `${brain} ${this.c("warning", "◐")} ${name} · ${this.c("dim", "checking…")}`;
+			return `${brain} ${this.c("warning", "◐")} ${name} · ${mode} · ${this.c("dim", "checking…")}`;
 
 		const busy = this.busyLabel();
 		if (busy)
-			return `${brain} ${this.c("warning", "⟳")} ${name} · ${counts} · ${this.c("warning", busy)}`;
-		return `${brain} ${this.dot()} ${name} · ${counts}${this.pausedHint()}`;
+			return `${brain} ${this.c("warning", "⟳")} ${name} · ${mode} · ${counts} · ${this.c("warning", busy)}`;
+		return `${brain} ${this.dot()} ${name} · ${mode} · ${counts}`;
 	}
 
-	/** Compact cue on line 1 when a session toggle has paused recall/retain. */
-	private pausedHint(): string {
+	/** Compact auto-mode cue: ↙ = recall, ↗ = retain. */
+	private autoMode(): string {
 		if (this.recall.off && this.memo.off)
-			return this.c("warning", " · auto off");
-		if (this.recall.off) return this.c("warning", " · recall off");
-		if (this.memo.off) return this.c("warning", " · retain off");
-		return "";
+			return this.c("warning", "auto off");
+		if (this.recall.off) return this.c("warning", "auto ↗");
+		if (this.memo.off) return this.c("warning", "auto ↙");
+		return this.c("dim", "auto ↙↗");
 	}
 
 	private render(): void {

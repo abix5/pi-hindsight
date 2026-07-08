@@ -21,9 +21,11 @@ sessions and context compaction. It works in two directions:
 A small status widget shows both contours live:
 
 ```
-🧠 pi-hindsight · 16 docs · 153 facts
+🧠 ● pi-hindsight · auto ↙↗ · 16 docs · 153 facts
 ↙ recall · db migration command · found→injected
 ```
+
+Auto-mode markers: `↙` = recall, `↗` = retain, `auto off` = both disabled.
 
 ---
 
