@@ -1,7 +1,7 @@
 {
-  "name": "pi-hindsight",
-  "version": "0.0.1",
-  "private": true,
+  "name": "@abix5/pi-hindsight",
+  "version": "0.1.0",
+  "private": false,
   "type": "module",
   "description": "pi coding-agent extension: long-term project memory via a local Hindsight instance (recall + memorize)",
   "license": "MIT",
@@ -9,6 +9,21 @@
   "repository": {
     "type": "git",
     "url": "git+https://github.com/abix5/pi-hindsight.git"
+  },
+  "main": "./src/index.ts",
+  "exports": "./src/index.ts",
+  "files": [
+    "src",
+    "taskflows",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "prepack": "npm run typecheck"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "pi",
@@ -20,6 +35,14 @@
   ],
   "pi": {
     "taskflows": ["./taskflows"]
+  },
+  "dependencies": {
+    "@earendil-works/pi-agent-core": "^0.80.3",
+    "@earendil-works/pi-ai": "^0.80.3",
+    "@earendil-works/pi-coding-agent": "^0.80.3",
+    "@earendil-works/pi-tui": "^0.80.3",
+    "pi-taskflow": "^0.1.7",
+    "typebox": "1.1.38"
   },
   "devDependencies": {
     "@types/node": "^26.0.1",

@@ -369,8 +369,7 @@ export class HindsightStatus {
 
 	/** Compact auto-mode cue: ↙ = recall, ↗ = retain. */
 	private autoMode(): string {
-		if (this.recall.off && this.memo.off)
-			return this.c("warning", "auto off");
+		if (this.recall.off && this.memo.off) return this.c("warning", "auto off");
 		if (this.recall.off) return this.c("warning", "auto ↗");
 		if (this.memo.off) return this.c("warning", "auto ↙");
 		return this.c("dim", "auto ↙↗");

@@ -92,7 +92,12 @@ Two markers track memory, answering different questions:
 
 ## Requirements
 
-- **pi coding-agent** (provides the extension runtime and model registry).
+- **pi coding-agent** (provides the extension runtime, model registry, and host
+  packages used by the extension APIs).
+- **pi-taskflow** for the recommended `memorizeEngine: "taskflow"` path. The npm
+  package is installed as a dependency, but the taskflow extension/tool must also
+  be available to pi so the agent can run the `taskflow` tool. Use
+  `memorizeEngine: "inline"` only if you intentionally want no taskflow runtime.
 - A running **Hindsight** HTTP API — by default `http://localhost:8888`,
   namespace `default`. On macOS, the easiest way to get one is
   [**hindsight-setup**](https://github.com/abix5/hindsight-setup).
@@ -111,7 +116,18 @@ Two markers track memory, answering different questions:
 pi auto-discovers `.pi/extensions/*.ts` in a trusted project. To add pi-hindsight
 to a project:
 
-1. **Clone this repo** somewhere stable:
+1. **Install the packages**:
+
+   ```bash
+   npm install -D @abix5/pi-hindsight pi-taskflow
+   ```
+
+   `@abix5/pi-hindsight` also declares `pi-taskflow` and the pi runtime packages
+   as dependencies, so npm installs the code needed for module resolution. The
+   explicit `pi-taskflow` install keeps the required pi extension visible in the
+   consuming project.
+
+   Or clone it somewhere stable if you prefer local development:
 
    ```bash
    git clone https://github.com/abix5/pi-hindsight.git ~/tools/pi-hindsight
@@ -120,20 +136,29 @@ to a project:
 2. **Add a loader** in your project at `.pi/extensions/hindsight.ts`:
 
    ```ts
+   export { default } from "@abix5/pi-hindsight";
+   ```
+
+   For a local clone, point at the source path instead:
+
+   ```ts
    export { default } from "/absolute/path/to/pi-hindsight/src/index.ts";
    ```
 
    (Running pi *inside this repo* works out of the box — a loader is already
    present.)
 
-3. **Register the taskflow.** Copy `taskflows/memory-fill.json` into your
-   project's `.pi/taskflows/`, or point your `package.json` at it:
+3. **Register the taskflow.** Point your project `package.json` at the packaged
+   taskflow directory:
 
    ```json
-   { "pi": { "taskflows": ["./taskflows"] } }
+   { "pi": { "taskflows": ["./node_modules/@abix5/pi-hindsight/taskflows"] } }
    ```
 
-4. **Set your models** in `taskflows/memory-fill.json`. The `build` and `dedup`
+   For a local clone, either copy `taskflows/memory-fill.json` into your
+   project's `.pi/taskflows/`, or point at the clone's `taskflows/` directory.
+
+4. **Set your models** in the active `memory-fill.json`. The `build` and `dedup`
    phases have `"model": "..."` fields — change them to models you actually have.
 
 5. **Create `.pi/hindsight.json`** (see below), trust the project, then
@@ -157,8 +182,20 @@ Settings are read from environment variables, then overridden by
   "recallModelId": "your/recall-model",
   "recallOperation": "recall",
   "recallFilter": "model",
+  "recallEffort": "normal",
+  "recallMaxQueries": 8,
   "recallMaxLines": 8,
-  "recallContextTokens": 5000
+  "recallContextTokens": 5000,
+  "factCategories": {
+    "goal": "on",
+    "decisions": "on",
+    "constraints": "on",
+    "knowhow": "on",
+    "pitfalls": "on",
+    "facts": "on",
+    "code": "off",
+    "domain": "off"
+  }
 }
 ```
 
@@ -197,7 +234,7 @@ Settings are read from environment variables, then overridden by
 | `/mem-recall <query>` | Ad-hoc search of the memory bank |
 | `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing) |
 | `/mem-auto [on\|off]` | Toggle **both** auto-recall & auto-retain (or `/mem-auto recall\|retain on\|off` for one; bare `/mem-auto` shows state) |
-| `/mem-types` | Pick which fact categories to extract — tri-state checklist (✅ extract · ⬜ neutral · ❌ exclude); also `/mem-types <key> on\|off\|ban` |
+| `/mem-types` | Pick which fact categories to extract — tri-state checklist (`✓` extract · `○` neutral · `✗` exclude); also `/mem-types <key> on\|off\|ban` |
 | `/mem-effort [light\|normal\|thorough]` | How thorough recall is — how many bank queries / refine rounds it spends |
 | `/mem-log` · `alt+h` | Open the memory operation history |
 | `/mem-status` | Health check, bank, pointer position, and toggle state |
