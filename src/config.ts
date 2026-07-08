@@ -10,6 +10,9 @@ import * as path from "node:path";
 
 export type Budget = "low" | "mid" | "high";
 
+/** How hard recall works: number of bank queries and refine rounds. */
+export type RecallEffort = "light" | "normal" | "thorough";
+
 export interface HindsightConfig {
 	/** Base URL of the Hindsight HTTP API. */
 	baseUrl: string;
@@ -33,6 +36,15 @@ export interface HindsightConfig {
 	recallContextTokens: number;
 	/** Recall operation: raw facts or Hindsight-generated reflection. */
 	recallOperation: "recall" | "reflect";
+	/** How thorough recall is: controls how many bank queries / refine rounds we spend. */
+	recallEffort: RecallEffort;
+	/** Hard ceiling on total bank queries per recall (safety bound across all rounds). */
+	recallMaxQueries: number;
+	/**
+	 * Fact-category configurator for the memorize contour. Loose shape:
+	 * `{ <key>: "on"|"off"|"ban", custom?: CustomCategory[] }`. Parsed by categories.ts.
+	 */
+	factCategories?: Record<string, unknown>;
 	/** Recall filtering mode: model-selected indexes, or off. */
 	recallFilter: "model" | "off";
 	/** Recall search budget. */
@@ -57,7 +69,7 @@ export interface HindsightConfig {
 	deltaDir: string;
 	/** Path (relative to cwd) of the rolling prior-summary file. */
 	priorSummaryPath: string;
-	/** Durable JSONL operation log for /hindsight-log. */
+	/** Durable JSONL operation log for /mem-log. */
 	logPath: string;
 	/** Background poll interval (ms) for refreshing widget doc/fact counters. */
 	countsRefreshMs: number;
@@ -83,6 +95,11 @@ function envFloat(name: string, def: number): number {
 	if (v === undefined) return def;
 	const n = Number.parseFloat(v);
 	return Number.isFinite(n) ? n : def;
+}
+
+/** Coerce an arbitrary value into a RecallEffort, falling back when unknown. */
+export function parseEffort(v: unknown, def: RecallEffort): RecallEffort {
+	return v === "light" || v === "normal" || v === "thorough" ? v : def;
 }
 
 /** Normalize an arbitrary string into a safe bank id slug. */
@@ -126,6 +143,9 @@ function readProjectOverrides(cwd: string): Partial<HindsightConfig> {
 			"recallMaxLines",
 			"recallContextTokens",
 			"recallOperation",
+			"recallEffort",
+			"recallMaxQueries",
+			"factCategories",
 			"recallFilter",
 			"recallBudget",
 			"autoMemorize",
@@ -168,6 +188,8 @@ export function loadConfig(cwd: string): HindsightConfig {
 			process.env.HINDSIGHT_RECALL_OPERATION === "reflect"
 				? "reflect"
 				: "recall",
+		recallEffort: parseEffort(process.env.HINDSIGHT_RECALL_EFFORT, "normal"),
+		recallMaxQueries: envInt("HINDSIGHT_RECALL_MAX_QUERIES", 8),
 		recallFilter:
 			process.env.HINDSIGHT_RECALL_FILTER === "off" ? "off" : "model",
 		recallBudget: (process.env.HINDSIGHT_RECALL_BUDGET as Budget) || "mid",
@@ -187,4 +209,34 @@ export function loadConfig(cwd: string): HindsightConfig {
 		debug: envBool("HINDSIGHT_DEBUG", false),
 	};
 	return { ...base, ...readProjectOverrides(cwd) };
+}
+
+/**
+ * Merge a partial config into `.pi/hindsight.json` and write it back (pretty).
+ * Used by /mem-types and /mem-effort to persist runtime changes for next session.
+ * Returns true on success. Never throws — a failed write just means the change
+ * lives only in the in-memory config until reload.
+ */
+export function patchConfigFile(
+	cwd: string,
+	patch: Record<string, unknown>,
+): boolean {
+	const file = path.join(cwd, ".pi", "hindsight.json");
+	try {
+		let current: Record<string, unknown> = {};
+		try {
+			current = JSON.parse(fs.readFileSync(file, "utf8")) as Record<
+				string,
+				unknown
+			>;
+		} catch {
+			/* no file yet — start fresh */
+		}
+		const next = { ...current, ...patch };
+		fs.mkdirSync(path.dirname(file), { recursive: true });
+		fs.writeFileSync(file, `${JSON.stringify(next, null, 2)}\n`);
+		return true;
+	} catch {
+		return false;
+	}
 }

@@ -16,9 +16,25 @@ import type {
 
 export const STATE_CUSTOM_TYPE = "hindsight-state";
 
+/**
+ * A transcript range whose facts were ALREADY stored to the bank out-of-band
+ * (via /mem-remember), bounded by entry ids as (start, end]. When a later
+ * memorize pass includes this range in its delta, those entries are wrapped in
+ * ALREADY-SAVED markers so the extractor does not emit their facts a second
+ * time. Ephemeral: pruned once the watermark advances past `end`.
+ */
+export interface SavedRange {
+	/** Entry id just BEFORE the saved block (exclusive lower bound). */
+	start: string;
+	/** Last entry id of the saved block (inclusive upper bound). */
+	end: string;
+}
+
 export interface HindsightState {
 	/** Id of the last session entry already flushed to memory. */
 	watermark?: string;
+	/** Ranges already stored via /mem-remember, excluded from re-extraction. */
+	savedRanges?: SavedRange[];
 }
 
 /** Restore the latest state from session custom entries. */
@@ -64,9 +80,9 @@ export function writePriorSummary(
  *
  * The taskflow write phase deletes its own `_doc-<tag>.txt` after storing, but a
  * crashed or aborted flow leaves its staged report behind. Without a sweep those
- * pile up in the delta dir. This only ever removes files matching `_doc-*.txt`
- * (never `current.md` or the chunk files) and is best-effort. Returns the count
- * removed.
+ * pile up in the delta dir. This removes orphaned per-run files matching
+ * `_doc-*.txt`, `current-*.md`, or `spec-*.md` (never the numbered chunk files)
+ * and is best-effort. Returns the count removed.
  */
 export function sweepStaleFlowDocs(
 	cwd: string,
@@ -83,7 +99,7 @@ export function sweepStaleFlowDocs(
 	const cutoff = Date.now() - maxAgeMs;
 	let removed = 0;
 	for (const f of files) {
-		if (!/^_doc-.*\.txt$/.test(f)) continue;
+		if (!/^(_doc-.*\.txt|current-.*\.md|spec-.*\.md)$/.test(f)) continue;
 		const p = path.join(dir, f);
 		try {
 			if (fs.statSync(p).mtimeMs < cutoff) {

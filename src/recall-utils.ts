@@ -74,6 +74,69 @@ export function parseDecision(raw: string): QueryDecision {
 	}
 }
 
+/** A multi-query recall plan produced by the (new) QUERY_BUILDER. */
+export interface QueryPlan {
+	shouldQuery: boolean;
+	op: "recall" | "reflect";
+	queries: string[];
+	reason?: string;
+}
+
+/** Parse the multi-query builder output; tolerates the legacy single-"query" shape. */
+export function parseQueryPlan(raw: string): QueryPlan {
+	try {
+		const obj = JSON.parse(raw.trim()) as {
+			shouldQuery?: unknown;
+			op?: unknown;
+			queries?: unknown;
+			query?: unknown;
+			reason?: unknown;
+		};
+		const list = Array.isArray(obj.queries)
+			? obj.queries
+			: typeof obj.query === "string"
+				? [obj.query]
+				: [];
+		const queries = [
+			...new Set(
+				list
+					.map((q) => (typeof q === "string" ? q.trim() : ""))
+					.filter(Boolean),
+			),
+		];
+		return {
+			shouldQuery: obj.shouldQuery === true && queries.length > 0,
+			op: obj.op === "reflect" ? "reflect" : "recall",
+			queries,
+			reason: typeof obj.reason === "string" ? obj.reason.trim() : undefined,
+		};
+	} catch {
+		return {
+			shouldQuery: false,
+			op: "recall",
+			queries: [],
+			reason: "query-builder returned non-JSON",
+		};
+	}
+}
+
+/** Parse a refine-round reply into a list of follow-up queries (empty = stop). */
+export function parseRefine(raw: string): string[] {
+	try {
+		const obj = JSON.parse(raw.trim()) as { more?: unknown; queries?: unknown };
+		if (obj.more !== true || !Array.isArray(obj.queries)) return [];
+		return [
+			...new Set(
+				obj.queries
+					.map((q) => (typeof q === "string" ? q.trim() : ""))
+					.filter(Boolean),
+			),
+		];
+	} catch {
+		return [];
+	}
+}
+
 function hitText(item: unknown): string {
 	if (typeof item === "string") return item;
 	const it = item as Record<string, unknown>;
@@ -130,7 +193,7 @@ export function seenInjectedFacts(ctx: ExtensionContext): Set<string> {
 	const lastCompact = entries.findLastIndex((e) => e.type === "compaction");
 	for (const entry of entries.slice(lastCompact + 1)) {
 		const text = JSON.stringify(entry);
-		if (!text.includes("hindsight-recall")) continue;
+		if (!text.includes("mem-recall")) continue;
 		// Record ONLY the bullets UNDER the "Injected facts" marker. The trace lines
 		// above it are ALSO bullets ("- Bank query:", "- Found in bank:") but are not
 		// facts, so anchoring on the marker keeps them out of the seen-set.

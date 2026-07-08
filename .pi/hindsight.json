@@ -6,6 +6,17 @@
   "recallModelId": "proxy/deepseek-v4-flash",
   "recallOperation": "recall",
   "recallFilter": "model",
+  "recallEffort": "thorough",
   "recallMaxLines": 8,
-  "recallContextTokens": 5000
+  "recallContextTokens": 5000,
+  "factCategories": {
+    "goal": "on",
+    "decisions": "on",
+    "constraints": "on",
+    "knowhow": "on",
+    "pitfalls": "on",
+    "facts": "on",
+    "code": "off",
+    "domain": "off"
+  }
 }

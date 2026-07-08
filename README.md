@@ -46,9 +46,12 @@ Two operations are supported:
 
 ### Memorize (write path — taskflow)
 
-Triggered **only** on context compaction and the manual `/hindsight-flush`
-command — never on shutdown or reload (nothing is lost there, so there is
-nothing to save). It is strictly fire-and-forget: the agent never waits.
+Triggered on context compaction, the manual `/mem-save` command, and — as a
+last-chance safety net — when a session is **quit or replaced by `/new`** (so an
+un-memorized tail is not lost). It is **never** triggered by `/reload` (nothing
+is lost there). Compaction and manual writes are fire-and-forget (the agent
+never waits); the session-close write runs inline and is awaited before the
+process exits, bounded by a 60s cap so quitting can never hang.
 
 The write is a deterministic [taskflow](https://github.com/earendil-works/pi)
 (`taskflows/memory-fill.json`) with four phases:
@@ -66,6 +69,22 @@ The write is a deterministic [taskflow](https://github.com/earendil-works/pi)
 Bank I/O lives in the **script** phases (plain `curl`), not in subagents — so it
 never depends on a subagent having the right tools, and no model sits in the
 write path to derail it.
+
+### Pointers & `/mem-remember`
+
+Two markers track memory, answering different questions:
+
+- **Watermark** — *how far through the transcript* has been memorized. It only
+  moves forward; the next write resumes right after it. `/mem-mark` advances it
+  to now **without writing** (mark everything so far as already processed).
+- **Saved ranges** — *which blocks were already stored out-of-band* by
+  `/mem-remember`. `/mem-remember <prompt>` hands the agent a study task; the
+  agent gathers what it needs and stores the durable facts immediately (so it
+  works even with auto-retain off). The transcript range of that work is
+  recorded, and at the next memorize it is wrapped in `ALREADY SAVED` markers so
+  the extractor sees it for context but does **not** extract those facts a
+  second time — no duplicates, no bank lookup, and the agent can keep using the
+  facts in the conversation. The range is dropped once the watermark passes it.
 
 ---
 
@@ -118,7 +137,7 @@ to a project:
 5. **Create `.pi/hindsight.json`** (see below), trust the project, then
    `/reload` in pi.
 
-6. Verify the bank connection with `/hindsight-ping`.
+6. Verify the bank connection with `/mem-status`.
 
 ---
 
@@ -147,11 +166,14 @@ Settings are read from environment variables, then overridden by
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
 | `bankId` | `HINDSIGHT_BANK` | project folder slug | Memory bank id |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn |
-| `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction |
+| `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle per-session with `/mem-auto`) |
 | `memorizeEngine` | `HINDSIGHT_MEMORIZE_ENGINE` | `inline` | `taskflow` (recommended) or `inline` |
 | `recallModelId` | `HINDSIGHT_RECALL_MODEL` | pi default | Cheap model for query-building / filtering |
 | `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | pi default | Model for the inline write pipeline |
 | `recallOperation` | `HINDSIGHT_RECALL_OPERATION` | `recall` | `recall` (facts) or `reflect` (answer) |
+| `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Recall thoroughness: `light` / `normal` / `thorough` (set via `/mem-effort`) |
+| `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
+| `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set via `/mem-types`) |
 | `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (LLM-picked) or `off` |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
 | `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent context budget for the query |
@@ -167,17 +189,25 @@ Settings are read from environment variables, then overridden by
 
 | Command | What it does |
 | --- | --- |
-| `/hindsight-flush` | Write accumulated context into memory right now |
-| `/hindsight-rememorize` | Re-collect the **whole** session (ignore the watermark) |
-| `/hindsight-log` · `alt+h` | Open the memory operation history |
-| `/hindsight-ping` | Health check, list banks, ensure the project bank exists |
-| `/hindsight-recall <query>` | Ad-hoc search of the memory bank |
-| `/hindsight-model [prompt]` | Resolve the small model and run a tiny completion |
+| `/mem-save` | Save the accumulated context to memory now |
+| `/mem-resave` | Re-collect the **whole** session (ignore the pointer) |
+| `/mem-remember <prompt>` | Have the agent study something and store it now |
+| `/mem-recall <query>` | Ad-hoc search of the memory bank |
+| `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing) |
+| `/mem-auto [on\|off]` | Toggle **both** auto-recall & auto-retain (or `/mem-auto recall\|retain on\|off` for one; bare `/mem-auto` shows state) |
+| `/mem-types` | Pick which fact categories to extract — tri-state checklist (✅ extract · ⬜ neutral · ❌ exclude); also `/mem-types <key> on\|off\|ban` |
+| `/mem-effort [light\|normal\|thorough]` | How thorough recall is — how many bank queries / refine rounds it spends |
+| `/mem-log` · `alt+h` | Open the memory operation history |
+| `/mem-status` | Health check, bank, pointer position, and toggle state |
+| `/mem-model [prompt]` | Resolve the small model and run a tiny completion |
 
 ### Agent tools
 
 The extension also registers tools the agent (and subagents) can call directly:
 `hindsight_recall`, `hindsight_reflect`, `hindsight_retain`.
+
+Injected memory appears in the chat as a `🧠 recall` block; a memory write shows
+live on the widget's second line (see below).
 
 ---
 
@@ -194,6 +224,43 @@ plans, transient details (line numbers, timestamps, run ids), or **secret
 values** — only *where* a secret lives (env-var name, config path) is kept.
 
 The `dedup` phase means the same fact is not stored twice, even across sessions.
+
+### Fact categories (`/mem-types`)
+
+*What* gets harvested is configurable. Each category is **tri-state**:
+
+- `✓` **on** — extract it: its heading + guidance + example steer the extractor;
+- `○` **off** — neutral: not mentioned at all (neither asked for nor forbidden);
+- `✗` **ban** — explicitly excluded: the extractor is told to drop it.
+
+| Category | Default | What it captures |
+| --- | --- | --- |
+| Goal | `✓` | The objective and its definition of done |
+| Decisions | `✓` | Choices made + rationale / trade-offs |
+| Constraints & preferences | `✓` | Standing user rules (style, always/never, tooling) |
+| Know-how | `✓` | Verified procedures: commands, configs, fixes that worked |
+| Pitfalls | `✓` | Approaches tried that FAILED, and why |
+| Facts & locations | `✓` | Endpoints, ports, versions, env-var names, where secrets live |
+| Code map | `○` | Which file/symbol holds what, module responsibilities |
+| Domain knowledge | `○` | External / business facts, terminology |
+
+Add your own from the picker (`+ Add custom type`) or with `/mem-types <key> on`. State lives in
+`.pi/hindsight.json` under `factCategories` and applies to both the inline and
+taskflow write paths.
+
+### Recall effort (`/mem-effort`)
+
+Recall does not use categories. Instead it turns the user's question plus recent
+context (`recallContextTokens`) into **several** bank queries from different
+angles, picks the relevant hits, and — when set to *thorough* — asks follow-up
+queries based on what it found, until it has enough or the query budget
+(`recallMaxQueries`) runs out.
+
+| Effort | Queries / round | Rounds | Feel |
+| --- | --- | --- | --- |
+| `light` | 1 | 1 | one quick lookup |
+| `normal` (default) | 2–3 | 1 | a few angles, one pass |
+| `thorough` | 3–4 | up to 3 | iterative: later rounds build on earlier hits |
 
 ---
 

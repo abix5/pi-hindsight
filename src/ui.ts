@@ -1,9 +1,10 @@
 /**
  * Persistent status surface for pi-hindsight.
  *
- * Two views, updated together (same primitives todo/plan-mode use):
- *   - a widget block above the editor: bank connection + live recall/memorize state;
- *   - a compact footer indicator (setStatus): quick "is memory doing anything" glance.
+ * A single widget block above the editor (same primitive todo/plan-mode use)
+ * shows bank connection + live recall/memorize state on exactly two lines. There
+ * is deliberately no status-bar strip: it duplicated the widget's dot. Any strip
+ * left by an older version is cleared on the next render.
  *
  * Everything is fire-and-forget and guarded, so a missing UI is a no-op.
  */
@@ -200,6 +201,10 @@ export class HindsightStatus {
 		this.memo.off = true;
 		this.render();
 	}
+	memoOn(): void {
+		this.memo.off = false;
+		this.render();
+	}
 	setQueue(waiting: number): void {
 		this.memo.queue = Math.max(0, waiting);
 		this.render();
@@ -255,10 +260,14 @@ export class HindsightStatus {
 	private c(color: ThemeColor, s: string): string {
 		return this.ui?.theme?.fg ? this.ui.theme.fg(color, s) : s;
 	}
+	// The theme's "success" hue reads yellow-green (salad) in some terminals, so
+	// the healthy dot is forced to a true green via a raw truecolor SGR, resetting
+	// only the foreground (\x1b[39m) afterwards so no other styling leaks.
+	private static readonly GREEN_DOT = "\u001b[38;2;46;204;64m●\u001b[39m";
 	private dot(): string {
 		switch (this.bank.state) {
 			case "ok":
-				return this.c("success", "●");
+				return this.ui?.theme?.fg ? HindsightStatus.GREEN_DOT : "●";
 			case "error":
 				return this.c("error", "●");
 			case "checking":
@@ -353,21 +362,16 @@ export class HindsightStatus {
 		const busy = this.busyLabel();
 		if (busy)
 			return `${brain} ${this.c("warning", "⟳")} ${name} · ${counts} · ${this.c("warning", busy)}`;
-		return `${brain} ${this.dot()} ${name} · ${counts}`;
+		return `${brain} ${this.dot()} ${name} · ${counts}${this.pausedHint()}`;
 	}
 
-	private footer(): string {
-		const memoBusy =
-			this.memo.phase === "collecting" ||
-			this.memo.phase === "extracting" ||
-			this.memo.phase === "writing";
-		if (this.recall.active)
-			return `${this.c("accent", "🧠")} ${this.c("warning", "↙⟳")}`;
-		if (memoBusy)
-			return `${this.c("accent", "🧠")} ${this.c("warning", "↗⟳")}${
-				this.memo.queue > 0 ? this.c("dim", ` q${this.memo.queue}`) : ""
-			}`;
-		return `${this.c("accent", "🧠")} ${this.dot()}`;
+	/** Compact cue on line 1 when a session toggle has paused recall/retain. */
+	private pausedHint(): string {
+		if (this.recall.off && this.memo.off)
+			return this.c("warning", " · auto off");
+		if (this.recall.off) return this.c("warning", " · recall off");
+		if (this.memo.off) return this.c("warning", " · retain off");
+		return "";
 	}
 
 	private render(): void {
@@ -380,6 +384,8 @@ export class HindsightStatus {
 		// the color codes. The strings are bounded by construction.
 		const line2 = this.lastAction || this.c("dim", "· ready");
 		this.ui.setWidget(WIDGET_ID, [this.widgetLine(), line2]);
-		this.ui.setStatus?.(WIDGET_ID, this.footer());
+		// No footer strip: the 2-line widget is the single source of truth. Clear any
+		// strip a previous version may have left in the status bar.
+		this.ui.setStatus?.(WIDGET_ID, undefined);
 	}
 }

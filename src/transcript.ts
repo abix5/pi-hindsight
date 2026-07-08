@@ -7,6 +7,16 @@
  */
 
 import type { SessionEntry } from "@earendil-works/pi-coding-agent";
+import type { SavedRange } from "./state.ts";
+
+/**
+ * Markers wrapped around already-stored (/mem-remember) regions of the delta.
+ * The build/EXTRACT prompts key off these exact phrases to skip re-extracting
+ * facts that were already sent to the bank. Keep them in sync with the prompts.
+ */
+export const ALREADY_SAVED_OPEN =
+	"===== ALREADY SAVED TO MEMORY \u2014 CONTEXT ONLY \u2014 do NOT extract facts from this section (already stored earlier via /mem-remember) =====";
+export const ALREADY_SAVED_CLOSE = "===== END ALREADY SAVED =====";
 
 /** Read-only navigation/recon tools whose calls & results are pure noise for memory. */
 const NAV_TOOLS = new Set(["grep", "find", "ls", "read", "glob"]);
@@ -67,6 +77,39 @@ export function getDeltaEntries(
 	// Watermark already at/after the boundary → nothing new in this window.
 	if (startIdx + 1 >= endIdx) return [];
 	return entries.slice(startIdx + 1, endIdx);
+}
+
+/** Entry ids inside any saved range, as (start, end] by transcript position. */
+export function savedEntryIds(
+	entries: SessionEntry[],
+	ranges: SavedRange[] | undefined,
+): Set<string> {
+	const set = new Set<string>();
+	if (!ranges?.length) return set;
+	const idx = new Map(entries.map((e, i) => [e.id, i] as const));
+	for (const r of ranges) {
+		const end = idx.get(r.end);
+		if (end === undefined) continue;
+		const from = Math.max(0, (idx.get(r.start) ?? -1) + 1);
+		for (let i = from; i <= end; i++) set.add(entries[i].id);
+	}
+	return set;
+}
+
+/**
+ * Drop saved ranges the memorize watermark has already passed (end at or before
+ * the watermark). They can never appear in a future delta, so their markers are
+ * no longer needed.
+ */
+export function pruneConsumedRanges(
+	entries: SessionEntry[],
+	ranges: SavedRange[] | undefined,
+	watermarkId: string | undefined,
+): SavedRange[] {
+	if (!ranges?.length) return [];
+	const idx = new Map(entries.map((e, i) => [e.id, i] as const));
+	const wIdx = watermarkId ? (idx.get(watermarkId) ?? -1) : -1;
+	return ranges.filter((r) => (idx.get(r.end) ?? -1) > wIdx);
 }
 
 function truncateLines(text: string, maxLines: number): string {
@@ -161,13 +204,34 @@ function cleanEntry(entry: SessionEntry): string | null {
 	return null;
 }
 
-/** Clean + serialize delta entries into a single plain-text transcript. */
-export function serializeDelta(entries: SessionEntry[]): string {
-	const blocks: string[] = [];
+/**
+ * Clean + serialize delta entries into a single plain-text transcript. Entries
+ * whose ids are in `savedIds` are wrapped in ALREADY-SAVED markers (contiguous
+ * runs get one marker pair) so the extractor treats them as context-only.
+ */
+export function serializeDelta(
+	entries: SessionEntry[],
+	savedIds?: Set<string>,
+): string {
+	const items: Array<{ saved: boolean; text: string }> = [];
 	for (const e of entries) {
 		const cleaned = cleanEntry(e);
-		if (cleaned) blocks.push(cleaned);
+		if (cleaned)
+			items.push({ saved: savedIds?.has(e.id) ?? false, text: cleaned });
 	}
+	const blocks: string[] = [];
+	let inSaved = false;
+	for (const it of items) {
+		if (it.saved && !inSaved) {
+			blocks.push(ALREADY_SAVED_OPEN);
+			inSaved = true;
+		} else if (!it.saved && inSaved) {
+			blocks.push(ALREADY_SAVED_CLOSE);
+			inSaved = false;
+		}
+		blocks.push(it.text);
+	}
+	if (inSaved) blocks.push(ALREADY_SAVED_CLOSE);
 	return blocks.join("\n\n");
 }
 

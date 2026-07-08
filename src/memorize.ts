@@ -1,7 +1,7 @@
 /**
  * Contour A — Memorize (write path).
  *
- * Triggered on compaction and manual /hindsight-flush ONLY (never shutdown or
+ * Triggered on compaction and manual /mem-save ONLY (never shutdown or
  * reload). Runs OFF the event handler (fire-and-forget) so the main agent never
  * waits. Per-session FIFO queue keeps jobs of one session strictly sequential
  * (each needs the prior watermark).
@@ -22,7 +22,8 @@ import type { HindsightConfig } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug, appendLog } from "./log.ts";
 import { type ResolvedModel, resolveModel, runModel } from "./model.ts";
-import { EXTRACT, MERGE, SUMMARIZE, VERIFY } from "./prompts.ts";
+import { extractionSections } from "./categories.ts";
+import { buildExtractPrompt, MERGE, SUMMARIZE, VERIFY } from "./prompts.ts";
 import {
 	loadState,
 	readPriorSummary,
@@ -33,6 +34,8 @@ import {
 import {
 	chunkByWindow,
 	getDeltaEntries,
+	pruneConsumedRanges,
+	savedEntryIds,
 	serializeDelta,
 } from "./transcript.ts";
 import type { HindsightStatus } from "./ui.ts";
@@ -119,7 +122,7 @@ export class Memorizer {
 	schedule(
 		ctx: ExtensionContext,
 		reason: string,
-		opts?: { fromStart?: boolean; boundaryId?: string },
+		opts?: { fromStart?: boolean; boundaryId?: string; forceInline?: boolean },
 	): Promise<void> {
 		const sessionId = ctx.sessionManager.getSessionId() ?? "default";
 		const snapshot = ctx.sessionManager.getEntries();
@@ -141,10 +144,11 @@ export class Memorizer {
 					opts?.fromStart ?? false,
 					snapshot,
 					opts?.boundaryId,
+					opts?.forceInline ?? false,
 				),
 			)
 			.catch((err) => {
-				console.error("[hindsight] memorize failed:", (err as Error).message);
+				console.error("\uD83E\uDDE0 memorize failed:", (err as Error).message);
 				this.deps.status.memoError((err as Error).message);
 			})
 			.finally(() => {
@@ -156,7 +160,7 @@ export class Memorizer {
 	}
 
 	private notify(ctx: ExtensionContext, msg: string): void {
-		ctx.ui?.notify?.(`[hindsight] ${msg}`, "info");
+		ctx.ui?.notify?.(`\uD83E\uDDE0 ${msg}`, "info");
 	}
 
 	private async run(
@@ -165,6 +169,10 @@ export class Memorizer {
 		fromStart = false,
 		snapshot?: Entries,
 		boundaryId?: string,
+		// forceInline bypasses the taskflow engine and runs the in-process pipeline,
+		// awaited by the caller. Used at session shutdown, where taskflow cannot run
+		// (it needs a future agent turn that will never happen once we are exiting).
+		forceInline = false,
 	): Promise<void> {
 		const { pi, cfg } = this.deps;
 		const cwd = ctx.cwd ?? process.cwd();
@@ -172,7 +180,12 @@ export class Memorizer {
 		// a live read only if none was provided.
 		const entries = snapshot ?? ctx.sessionManager.getEntries();
 		// fromStart ignores the watermark: re-collect the whole session (recovery).
-		const watermark = fromStart ? undefined : loadState(entries).watermark;
+		const state = loadState(entries);
+		const watermark = fromStart ? undefined : state.watermark;
+		// Entries already stored via /mem-remember are wrapped in ALREADY-SAVED markers
+		// below so the extractor does not emit their facts again (even on a full
+		// re-collect, the facts are already in the bank).
+		const savedIds = savedEntryIds(entries, state.savedRanges);
 
 		// boundaryId = compaction's firstKeptEntryId. Memorize ONLY what compaction
 		// discards (before it), never the still-live tail. fromStart recovery ignores
@@ -182,7 +195,7 @@ export class Memorizer {
 			watermark,
 			fromStart ? undefined : boundaryId,
 		);
-		const deltaText = serializeDelta(delta);
+		const deltaText = serializeDelta(delta, savedIds);
 		// New watermark = last entry of THIS window (the entry just before the
 		// compaction boundary), so the next flush resumes exactly at firstKeptEntryId.
 		const windowLastId = delta[delta.length - 1]?.id;
@@ -198,7 +211,7 @@ export class Memorizer {
 		});
 		// Nothing new since the last flush. Make it VISIBLE (a manual flush that
 		// silently does nothing looks broken) and tell the user how to force a
-		// full re-collect. Use /hindsight-rememorize to ignore the watermark.
+		// full re-collect. Use /mem-resave to ignore the watermark.
 		if (!deltaText.trim()) {
 			this.deps.status.memoBlocked();
 			appendLog(cwd, cfg.logPath, {
@@ -209,7 +222,7 @@ export class Memorizer {
 			});
 			this.notify(
 				ctx,
-				"nothing new since last flush — memory is up to date (use /hindsight-rememorize to re-collect the whole session)",
+				"nothing new since last flush — memory is up to date (use /mem-resave to re-collect the whole session)",
 			);
 			return;
 		}
@@ -217,7 +230,7 @@ export class Memorizer {
 		// taskflow engine: the whole delta is injected into the flow as CONTEXT.
 		// We write ONE per-run input file (current-<tag>.md), advance the watermark,
 		// and ask the agent to run the flow. No chunking, no model resolution here.
-		if (cfg.memorizeEngine === "taskflow") {
+		if (cfg.memorizeEngine === "taskflow" && !forceInline) {
 			const lastId = windowLastId;
 			// Unique tag correlates OUR run inside taskflow's run records AND names the
 			// per-run input file, so two dispatches (e.g. a manual flush racing a
@@ -238,8 +251,36 @@ export class Memorizer {
 				this.deps.status.memoError("could not write delta file");
 				return;
 			}
-			// Delta is durably on disk, so advance the watermark on dispatch.
-			if (lastId) saveState(pi, { watermark: lastId });
+			// Category spec for the flow's build phase: which headings to extract and
+			// which to exclude, from the user's /mem-types config. Best-effort — if it
+			// cannot be written the flow just falls back to general extraction.
+			const specRel = `spec-${tag}.md`;
+			try {
+				const { headings, bans } = extractionSections(cfg);
+				const specText = `${
+					"EXTRACTION CATEGORIES \u2014 obey exactly.\n\n" +
+					"ENABLED headings (use ONLY these; each becomes a '## <heading>' section; skip one with nothing):\n\n"
+				}${
+					headings ||
+					"(none configured \u2014 extract general durable project knowledge)"
+				}${
+					bans
+						? `\n\nEXCLUDED headings \u2014 NEVER extract anything whose only home is one of these: ${bans}.\n`
+						: "\n"
+				}`;
+				fs.writeFileSync(path.resolve(cwd, cfg.deltaDir, specRel), specText);
+			} catch (err) {
+				appendDebug(cwd, "memorize.taskflow.spec_error", {
+					error: (err as Error).message,
+				});
+			}
+			// Delta is durably on disk, so advance the watermark on dispatch, and drop
+			// any saved ranges this window has now consumed.
+			if (lastId)
+				saveState(pi, {
+					watermark: lastId,
+					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
+				});
 			const dispatchedAt = Date.now();
 			// Stage 0: flow handed off. Shows "flow queued…" for the brief moment
 			// before the triggered turn creates the run record; watchFlowRun then
@@ -267,7 +308,7 @@ export class Memorizer {
 			// memorize job never blocks compaction.
 			pi.sendMessage(
 				{
-					customType: "hindsight-flow",
+					customType: "mem-write",
 					content:
 						`Store project memory now: use the taskflow tool to run flow \`${cfg.flowName}\` ` +
 						`with args.bank="${cfg.bankId}", args.tag="${tag}", args.baseUrl="${cfg.baseUrl}", ` +
@@ -329,7 +370,11 @@ export class Memorizer {
 				chunks: chunks.length,
 			});
 			await this.runInline(ctx, resolved, chunks, deltaText);
-			if (lastId) saveState(pi, { watermark: lastId });
+			if (lastId)
+				saveState(pi, {
+					watermark: lastId,
+					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
+				});
 			appendDebug(cwd, "memorize.watermark.saved", { reason, lastId });
 		} catch (err) {
 			appendDebug(cwd, "memorize.inline.error", {
@@ -444,8 +489,13 @@ export class Memorizer {
 			this.deps.cfg.deltaDir,
 			`current-${tag}.md`,
 		);
+		const specFile = path.resolve(
+			cwd,
+			this.deps.cfg.deltaDir,
+			`spec-${tag}.md`,
+		);
 		const finish = () => {
-			for (const f of [docFile, deltaFile]) {
+			for (const f of [docFile, deltaFile, specFile]) {
 				try {
 					fs.rmSync(f, { force: true });
 				} catch {
@@ -582,7 +632,9 @@ export class Memorizer {
 		const notes: string[] = [];
 		for (const [i, chunk] of chunks.entries()) {
 			const out = cleanProse(
-				await runModel(ctx, resolved, EXTRACT, chunk, { maxTokens: 1536 }),
+				await runModel(ctx, resolved, buildExtractPrompt(cfg), chunk, {
+					maxTokens: 1536,
+				}),
 			);
 			appendDebug(cwd, "memorize.extract.chunk", {
 				index: i,
@@ -771,6 +823,7 @@ export class Memorizer {
 		try {
 			const s = await this.deps.client.stats(ctx.signal);
 			appendDebug(cwd, "memorize.stats.done", { ...s });
+			this.deps.status.bankOk();
 			this.deps.status.setBankCounts(s.documents, s.facts);
 		} catch (err) {
 			appendDebug(cwd, "memorize.stats.error", {

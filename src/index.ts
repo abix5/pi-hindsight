@@ -8,15 +8,15 @@ import { appendDebug, appendLog, setDebugEnabled } from "./log.ts";
 import { Memorizer } from "./memorize.ts";
 import { resolveModel } from "./model.ts";
 import { runRecall } from "./recall.ts";
-import { sweepStaleFlowDocs } from "./state.ts";
+import { loadState, saveState, sweepStaleFlowDocs } from "./state.ts";
 import { registerTools } from "./tools.ts";
 import { HindsightStatus } from "./ui.ts";
 
 function recallTrace(recall: Awaited<ReturnType<typeof runRecall>>): string {
 	if (!recall.queried)
-		return `Long-term memory search:\n- Bank query: not sent\n- Reason: ${recall.reason}`;
+		return `\uD83E\uDDE0 recall\n- Bank query: not sent\n- Reason: ${recall.reason}`;
 	const lines = [
-		"Long-term memory search:",
+		"\uD83E\uDDE0 recall",
 		`- Bank query: ${recall.query || "(empty)"}`,
 		`- Found in bank: ${recall.found} fact(s)`,
 		`- Injected into context: ${recall.injected} fact(s)`,
@@ -92,6 +92,15 @@ export default function (pi: ExtensionAPI) {
 	let memorizer: Memorizer | undefined;
 	let countsTimer: ReturnType<typeof setInterval> | undefined;
 	const status = new HindsightStatus();
+	// Session-level runtime state that commands can flip WITHOUT editing config:
+	// the auto-recall / auto-memorize switches (default from config), and the
+	// pending /mem-remember capture (set by the command, closed on the next
+	// turn_end to record the stored range).
+	const runtime = {
+		autoRecall: true,
+		autoMemorize: true,
+		pendingRemember: undefined as { startId: string } | undefined,
+	};
 
 	// Register THIS instance's disposer, so the next (re)load can retire us cleanly.
 	g.__piHindsightDispose = () => {
@@ -109,6 +118,9 @@ export default function (pi: ExtensionAPI) {
 		if (!client) return;
 		try {
 			const s = await client.stats();
+			// A successful stats call proves the bank is reachable, so keep the resting
+			// dot green even if the initial ensureBank was slow or briefly failed.
+			status.bankOk();
 			status.setBankCounts(s.documents, s.facts);
 		} catch {
 			/* counts are best-effort */
@@ -123,6 +135,8 @@ export default function (pi: ExtensionAPI) {
 		memorizer?.dispose();
 		memorizer = new Memorizer({ pi, cfg, client, status });
 		status.setBank(cfg.bankId, cfg.baseUrl);
+		runtime.autoRecall = cfg.autoRecall;
+		runtime.autoMemorize = cfg.autoMemorize;
 		cfg.autoRecall ? status.recallOn() : status.recallOff();
 		if (!cfg.autoMemorize) status.memoOff();
 		if (countsTimer) clearInterval(countsTimer);
@@ -143,7 +157,7 @@ export default function (pi: ExtensionAPI) {
 
 	init(process.cwd());
 	registerTools(pi, getState);
-	registerCommands(pi, getState, () => memorizer, status);
+	registerCommands(pi, getState, () => memorizer, status, runtime);
 
 	pi.on("session_start", async (_event, ctx) => {
 		init(ctx.cwd ?? process.cwd());
@@ -166,11 +180,11 @@ export default function (pi: ExtensionAPI) {
 			} catch {
 				/* counts are best-effort */
 			}
-			ctx.ui?.notify?.(`[hindsight] bank "${cfg.bankId}" ready`, "info");
+			ctx.ui?.notify?.(`\uD83E\uDDE0 bank "${cfg.bankId}" ready`, "info");
 		} catch (err) {
 			status.bankError((err as Error).message);
 			ctx.ui?.notify?.(
-				`[hindsight] bank ensure failed: ${(err as Error).message}`,
+				`\uD83E\uDDE0 bank ensure failed: ${(err as Error).message}`,
 				"warning",
 			);
 		}
@@ -183,7 +197,7 @@ export default function (pi: ExtensionAPI) {
 			hasClient: !!client,
 		});
 		status.attach(ctx.ui);
-		if (!cfg?.autoRecall || !client) {
+		if (!runtime.autoRecall || !cfg || !client) {
 			status.recallOff();
 			return;
 		}
@@ -226,7 +240,7 @@ export default function (pi: ExtensionAPI) {
 			});
 			return {
 				message: {
-					customType: "hindsight-recall",
+					customType: "mem-recall",
 					content: recallTrace(recall),
 					display: true,
 				},
@@ -236,7 +250,7 @@ export default function (pi: ExtensionAPI) {
 				error: (err as Error).message,
 			});
 			status.recallDone(0);
-			console.error("[hindsight] recall failed:", (err as Error).message);
+			console.error("\uD83E\uDDE0 recall failed:", (err as Error).message);
 		}
 	});
 
@@ -256,10 +270,91 @@ export default function (pi: ExtensionAPI) {
 		status.attach(ctx.ui);
 		// Fire-and-forget: schedule() snapshots the pre-compaction delta synchronously,
 		// and the bank write runs server-side async, so compaction never waits on us.
-		if (cfg?.autoMemorize) memorizer?.schedule(ctx, "compact", { boundaryId });
+		if (runtime.autoMemorize)
+			memorizer?.schedule(ctx, "compact", { boundaryId });
 		appendDebug(cwd, "event.session_before_compact.done");
 	});
 
-	// NOTE: no session_shutdown flush. Memory is written on compact (and manual
-	// /hindsight-flush) only, so /reload stays instant and writes nothing.
+	// Close out a /mem-remember capture: the command recorded the entry id BEFORE
+	// its study turn; when that turn ends we record (start, end] as a saved range so
+	// the next memorize wraps it in ALREADY-SAVED markers and does not re-extract it.
+	pi.on("turn_end", async (_event, ctx) => {
+		if (!runtime.pendingRemember) return;
+		const { startId } = runtime.pendingRemember;
+		runtime.pendingRemember = undefined;
+		const cwd = ctx.cwd ?? process.cwd();
+		try {
+			const entries = ctx.sessionManager.getEntries();
+			const endId = entries[entries.length - 1]?.id;
+			if (!endId || endId === startId) return; // nothing was added
+			const ranges = loadState(entries).savedRanges ?? [];
+			ranges.push({ start: startId, end: endId });
+			saveState(pi, { savedRanges: ranges });
+			appendDebug(cwd, "memremember.range", {
+				startId,
+				endId,
+				ranges: ranges.length,
+			});
+		} catch (err) {
+			appendDebug(cwd, "memremember.range.error", {
+				error: (err as Error).message,
+			});
+		}
+	});
+
+	// Last-chance memory write on session teardown, so the un-memorized tail is not
+	// lost when a session is quit or replaced by /new WITHOUT a compaction. This
+	// MUST use the inline engine (forceInline): the taskflow engine needs a future
+	// agent turn, which never comes once we are tearing down. session_shutdown
+	// handlers are awaited before process exit (runner.emit), so the async write
+	// completes first — bounded by a 60s cap so quitting can never hang.
+	pi.on("session_shutdown", async (event, ctx) => {
+		const cwd = ctx.cwd ?? process.cwd();
+		appendDebug(cwd, "event.session_shutdown", {
+			reason: event.reason,
+			autoMemorize: cfg?.autoMemorize,
+			hasMemorizer: !!memorizer,
+		});
+		// Only when the tail is actually abandoned. reload keeps the same transcript
+		// (nothing lost); resume/fork continue it elsewhere.
+		if (event.reason !== "quit" && event.reason !== "new") return;
+		if (!runtime.autoMemorize || !memorizer || !client) return;
+		// On quit the TUI is already stopped, so the widget and message blocks cannot
+		// render — print one plain line so the user knows a write is in progress.
+		if (event.reason === "quit") {
+			try {
+				process.stdout.write("\uD83E\uDDE0 saving memory before exit\u2026\n");
+			} catch {
+				/* stdout may be gone on a dead terminal */
+			}
+		}
+		try {
+			status.attach(ctx.ui);
+		} catch {
+			/* UI may already be torn down */
+		}
+		const CAP_MS = 60_000;
+		let capTimer: ReturnType<typeof setTimeout> | undefined;
+		const cap = new Promise<void>((resolve) => {
+			capTimer = setTimeout(() => {
+				appendDebug(cwd, "event.session_shutdown.timeout", { capMs: CAP_MS });
+				resolve();
+			}, CAP_MS);
+		});
+		try {
+			await Promise.race([
+				memorizer.schedule(ctx, `shutdown:${event.reason}`, {
+					forceInline: true,
+				}),
+				cap,
+			]);
+		} catch (err) {
+			appendDebug(cwd, "event.session_shutdown.error", {
+				error: (err as Error).message,
+			});
+		} finally {
+			if (capTimer) clearTimeout(capTimer);
+		}
+		appendDebug(cwd, "event.session_shutdown.done", { reason: event.reason });
+	});
 }
