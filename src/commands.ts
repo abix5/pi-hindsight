@@ -3,6 +3,11 @@ import type {
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { openHistory } from "./history-ui.ts";
+import {
+	isReviewServerRunning,
+	startReviewServer,
+	stopReviewServer,
+} from "./review-server.ts";
 import { appendDebug } from "./log.ts";
 import { resolveModel, runModel } from "./model.ts";
 import {
@@ -13,7 +18,7 @@ import {
 import { type CatState, resolveCategories } from "./categories.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import type { Memorizer } from "./memorize.ts";
-import { loadState, saveState } from "./state.ts";
+import { loadState, readDispatchDocIds, saveState } from "./state.ts";
 import type { HindsightStatus } from "./ui.ts";
 
 /** Brain-prefixed toast, keeping the backend name out of the UI. */
@@ -58,10 +63,39 @@ export function registerCommands(
 		description:
 			"Memory: re-collect the WHOLE session into memory (ignore the pointer)",
 		handler: async (_args, ctx) => {
-			appendDebug(ctx.cwd ?? process.cwd(), "command.mem-resave");
+			const cwd = ctx.cwd ?? process.cwd();
+			appendDebug(cwd, "command.mem-resave");
 			const memorizer = getMemorizer();
 			if (!memorizer) return ctx.ui.notify(`${TAG} not initialized`, "error");
 			status.attach(ctx.ui);
+			const s = getState();
+			// Delete documents this session previously stored so the fromStart
+			// re-collect does not pile duplicates on top of them. Best-effort: read the
+			// append-only dispatch log, keep docIds for THIS session, delete each
+			// (tolerates 404). Old/stale entries are harmless. We do NOT rewrite the log.
+			if (s) {
+				const sessionId = ctx.sessionManager.getSessionId() ?? "default";
+				const docIds = readDispatchDocIds(
+					cwd,
+					s.cfg.dispatchLogPath,
+					sessionId,
+				);
+				appendDebug(cwd, "command.mem-resave.delete", {
+					sessionId,
+					docs: docIds.length,
+				});
+				for (const docId of docIds) {
+					try {
+						await s.client.deleteDocument(docId, ctx.signal);
+						appendDebug(cwd, "command.mem-resave.deleted", { docId });
+					} catch (err) {
+						appendDebug(cwd, "command.mem-resave.delete_error", {
+							docId,
+							error: (err as Error).message,
+						});
+					}
+				}
+			}
 			memorizer.schedule(ctx, "resave", { fromStart: true });
 			ctx.ui.notify(`${TAG} re-collecting the whole session`, "info");
 		},
@@ -278,6 +312,40 @@ export function registerCommands(
 			s.cfg.recallEffort = effort;
 			patchConfigFile(cwd, { recallEffort: effort });
 			ctx.ui.notify(`${TAG} recall effort: ${effort}`, "info");
+		},
+	});
+
+	// --- browser review -----------------------------------------------------
+	pi.registerCommand("mem-review", {
+		description:
+			"Memory: review stored documents in the browser (approve / edit / delete)",
+		handler: async (args, ctx) => {
+			const cwd = ctx.cwd ?? process.cwd();
+			appendDebug(cwd, "command.mem-review", { args });
+			status.attach(ctx.ui);
+			// `/mem-review stop` tears the server down; a bare call starts it (or
+			// re-opens the existing one) and always notifies the URL.
+			if (args.trim().toLowerCase() === "stop") {
+				if (isReviewServerRunning()) {
+					stopReviewServer();
+					ctx.ui.notify(`${TAG} review server stopped`, "info");
+				} else {
+					ctx.ui.notify(`${TAG} review server is not running`, "info");
+				}
+				return;
+			}
+			try {
+				const url = await startReviewServer();
+				ctx.ui.notify(`${TAG} review open: ${url}`, "info");
+			} catch (err) {
+				appendDebug(cwd, "command.mem-review.error", {
+					error: (err as Error).message,
+				});
+				ctx.ui.notify(
+					`${TAG} could not start review server: ${(err as Error).message}`,
+					"error",
+				);
+			}
 		},
 	});
 

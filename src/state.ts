@@ -7,6 +7,7 @@
  *   taskflow engine (or the inline engine) can read/write them.
  */
 
+import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
@@ -15,6 +16,23 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 
 export const STATE_CUSTOM_TYPE = "hindsight-state";
+
+/**
+ * Deterministic document id for a memorize window, so re-ingesting the SAME
+ * window (session + first + last delta entry id) upserts the existing Hindsight
+ * document (bank deletes it and its facts, then re-extracts) instead of creating
+ * a duplicate. Prefixed "pi-" and truncated for readability in logs/URLs.
+ */
+export function computeDocId(
+	sessionId: string,
+	firstId: string,
+	lastId: string,
+): string {
+	const hash = createHash("sha256")
+		.update(`${sessionId}:${firstId}:${lastId}`)
+		.digest("hex");
+	return `pi-${hash.slice(0, 24)}`;
+}
 
 /**
  * A transcript range whose facts were ALREADY stored to the bank out-of-band
@@ -55,6 +73,37 @@ export function saveState(pi: ExtensionAPI, state: HindsightState): void {
 
 function resolve(cwd: string, rel: string): string {
 	return path.isAbsolute(rel) ? rel : path.join(cwd, rel);
+}
+
+/**
+ * Read the append-only dispatch log and return docIds dispatched for `sessionId`
+ * (deduped, order preserved). Used by /mem-resave to delete previously stored
+ * documents before a full re-collect. Best-effort: a missing/garbled file or a
+ * malformed line is skipped, never thrown.
+ */
+export function readDispatchDocIds(
+	cwd: string,
+	rel: string,
+	sessionId: string,
+): string[] {
+	let raw: string;
+	try {
+		raw = fs.readFileSync(resolve(cwd, rel), "utf8");
+	} catch {
+		return [];
+	}
+	const seen = new Set<string>();
+	for (const line of raw.split("\n")) {
+		const t = line.trim();
+		if (!t) continue;
+		try {
+			const rec = JSON.parse(t) as { docId?: string; sessionId?: string };
+			if (rec.sessionId === sessionId && rec.docId) seen.add(rec.docId);
+		} catch {
+			/* skip a malformed line */
+		}
+	}
+	return [...seen];
 }
 
 export function readPriorSummary(cwd: string, rel: string): string {

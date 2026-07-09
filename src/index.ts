@@ -10,6 +10,7 @@ import { resolveModel } from "./model.ts";
 import { runRecall } from "./recall.ts";
 import { loadState, saveState, sweepStaleFlowDocs } from "./state.ts";
 import { registerTools } from "./tools.ts";
+import { stopReviewServer } from "./review-server.ts";
 import { HindsightStatus } from "./ui.ts";
 
 function recallTrace(recall: Awaited<ReturnType<typeof runRecall>>): string {
@@ -109,6 +110,9 @@ export default function (pi: ExtensionAPI) {
 		// Stop any in-flight flow watchers too, so an old Memorizer's polling timers
 		// stop writing to the retired widget after a /reload.
 		memorizer?.dispose();
+		// Close the /mem-review HTTP server so a retired instance does not leave a
+		// listening socket behind after a /reload.
+		stopReviewServer();
 		status.clear();
 	};
 
@@ -174,6 +178,29 @@ export default function (pi: ExtensionAPI) {
 		try {
 			await client.ensureBank();
 			status.bankOk();
+			// Best-effort: sync the bank's extraction levers to our config. A failure
+			// must never break init, so the whole sync is wrapped in try/catch.
+			try {
+				const bankCfg = (await client.getBankConfig(ctx.signal)) as
+					| { overrides?: Record<string, unknown> }
+					| undefined;
+				const overrides = bankCfg?.overrides ?? {};
+				const updates: Record<string, unknown> = {};
+				if (overrides.retain_mission !== cfg.retainMission)
+					updates.retain_mission = cfg.retainMission;
+				if (overrides.observations_mission !== cfg.observationsMission)
+					updates.observations_mission = cfg.observationsMission;
+				if (Object.keys(updates).length > 0) {
+					await client.updateBankConfig(updates, ctx.signal);
+					appendDebug(ctx.cwd ?? process.cwd(), "bank.mission.sync", {
+						updated: Object.keys(updates),
+					});
+				}
+			} catch (err) {
+				appendDebug(ctx.cwd ?? process.cwd(), "bank.mission.error", {
+					error: (err as Error).message,
+				});
+			}
 			try {
 				const s = await client.stats(ctx.signal);
 				status.setBankCounts(s.documents, s.facts);

@@ -23,8 +23,14 @@ import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug, appendLog } from "./log.ts";
 import { type ResolvedModel, resolveModel, runModel } from "./model.ts";
 import { extractionSections } from "./categories.ts";
-import { buildExtractPrompt, MERGE, SUMMARIZE, VERIFY } from "./prompts.ts";
 import {
+	buildExtractPrompt,
+	buildMergePrompt,
+	buildSummarizePrompt,
+	buildVerifyPrompt,
+} from "./prompts.ts";
+import {
+	computeDocId,
 	loadState,
 	readPriorSummary,
 	saveState,
@@ -38,6 +44,7 @@ import {
 	savedEntryIds,
 	serializeDelta,
 } from "./transcript.ts";
+import { enqueueAdd } from "./review-queue.ts";
 import type { HindsightStatus } from "./ui.ts";
 
 /** Session entries as returned by the session manager. */
@@ -68,6 +75,65 @@ function countBullets(note: string): number {
 	const lines = note.split("\n").map((l) => l.trim());
 	const bullets = lines.filter((l) => /^[-*\u2022]/.test(l)).length;
 	return bullets || lines.filter(Boolean).length;
+}
+
+/**
+ * Append one dispatch-log record (docId → memorize window) as a single O_APPEND
+ * write. Best-effort: a single small `JSON.stringify(...) + "\n"` write is atomic
+ * enough for parallel sessions, so we never read-modify-write the file. /mem-resave
+ * reads it back to delete previously stored documents before re-collecting.
+ */
+function appendDispatchLog(
+	cwd: string,
+	rel: string,
+	rec: {
+		docId: string;
+		sessionId: string;
+		firstId: string;
+		lastId: string;
+		reason: string;
+	},
+): void {
+	try {
+		const abs = path.isAbsolute(rel) ? rel : path.resolve(cwd, rel);
+		fs.mkdirSync(path.dirname(abs), { recursive: true });
+		fs.appendFileSync(
+			abs,
+			`${JSON.stringify({ ...rec, ts: new Date().toISOString() })}\n`,
+		);
+	} catch (err) {
+		appendDebug(cwd, "memorize.dispatchlog.error", {
+			error: (err as Error).message,
+		});
+	}
+}
+
+/**
+ * Best-effort enqueue of a stored document into the GLOBAL review queue
+ * (~/.pi/hindsight/review-queue.jsonl). Called alongside appendDispatchLog at
+ * every store/dispatch point. A single atomic O_APPEND write, so it is safe to
+ * call from parallel sessions; failures are swallowed inside enqueueAdd.
+ */
+function enqueueReview(
+	cwd: string,
+	cfg: HindsightConfig,
+	docId: string,
+	reason: string,
+): void {
+	try {
+		enqueueAdd({
+			docId,
+			bank: cfg.bankId,
+			baseUrl: cfg.baseUrl,
+			namespace: cfg.namespace,
+			project: cwd,
+			reason,
+		});
+	} catch (err) {
+		appendDebug(cwd, "memorize.review.enqueue_error", {
+			error: (err as Error).message,
+		});
+	}
 }
 
 function scrubMemoryNote(note: string): string {
@@ -227,6 +293,20 @@ export class Memorizer {
 			return;
 		}
 
+		// Deterministic document id for THIS window (session + first/last delta entry
+		// id). Re-ingesting the same window upserts the existing Hindsight document
+		// (bank deletes it and its facts, then re-extracts) instead of duplicating.
+		const sessionId = ctx.sessionManager.getSessionId() ?? "default";
+		const firstId = delta[0]?.id ?? "";
+		const docId = computeDocId(sessionId, firstId, windowLastId ?? "");
+		appendDebug(cwd, "memorize.docid", {
+			reason,
+			sessionId,
+			firstId,
+			lastId: windowLastId,
+			docId,
+		});
+
 		// taskflow engine: the whole delta is injected into the flow as CONTEXT.
 		// We write ONE per-run input file (current-<tag>.md), advance the watermark,
 		// and ask the agent to run the flow. No chunking, no model resolution here.
@@ -276,11 +356,25 @@ export class Memorizer {
 			}
 			// Delta is durably on disk, so advance the watermark on dispatch, and drop
 			// any saved ranges this window has now consumed.
-			if (lastId)
+			if (lastId) {
 				saveState(pi, {
 					watermark: lastId,
 					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
 				});
+				// Record the dispatched window so /mem-resave can delete this doc before
+				// a full re-collect (best-effort, single O_APPEND write).
+				appendDispatchLog(cwd, cfg.dispatchLogPath, {
+					docId,
+					sessionId,
+					firstId,
+					lastId,
+					reason,
+				});
+				// Enqueue into the GLOBAL review queue at dispatch time. The flow may
+				// still store nothing (build → NONE); the review UI auto-drops queue
+				// entries whose bank GET returns 404, so an empty doc is harmless.
+				enqueueReview(cwd, cfg, docId, reason);
+			}
 			const dispatchedAt = Date.now();
 			// Stage 0: flow handed off. Shows "flow queued…" for the brief moment
 			// before the triggered turn creates the run record; watchFlowRun then
@@ -312,7 +406,7 @@ export class Memorizer {
 					content:
 						`Store project memory now: use the taskflow tool to run flow \`${cfg.flowName}\` ` +
 						`with args.bank="${cfg.bankId}", args.tag="${tag}", args.baseUrl="${cfg.baseUrl}", ` +
-						`args.namespace="${cfg.namespace}". The session delta is already prepared as context ` +
+						`args.namespace="${cfg.namespace}", args.docId="${docId}", args.lang="${cfg.memoryLanguage}". The session delta is already prepared as context ` +
 						`in ${cfg.deltaDir}/${deltaRel}. Run it now and report the stored result. ` +
 						`Do not edit any source files.`,
 					display: true,
@@ -369,12 +463,24 @@ export class Memorizer {
 				reason,
 				chunks: chunks.length,
 			});
-			await this.runInline(ctx, resolved, chunks, deltaText);
-			if (lastId)
+			await this.runInline(ctx, resolved, chunks, deltaText, docId);
+			if (lastId) {
 				saveState(pi, {
 					watermark: lastId,
 					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
 				});
+				// Record the stored window so /mem-resave can delete this doc before a
+				// full re-collect (best-effort, single O_APPEND write).
+				appendDispatchLog(cwd, cfg.dispatchLogPath, {
+					docId,
+					sessionId,
+					firstId,
+					lastId,
+					reason,
+				});
+				// Also enqueue the stored document into the GLOBAL review queue.
+				enqueueReview(cwd, cfg, docId, reason);
+			}
 			appendDebug(cwd, "memorize.watermark.saved", { reason, lastId });
 		} catch (err) {
 			appendDebug(cwd, "memorize.inline.error", {
@@ -622,6 +728,7 @@ export class Memorizer {
 		resolved: ResolvedModel,
 		chunks: string[],
 		deltaText: string,
+		docId: string,
 	): Promise<"done" | "blocked"> {
 		const { cfg } = this.deps;
 		const cwd = ctx.cwd ?? process.cwd();
@@ -677,7 +784,7 @@ export class Memorizer {
 					await runModel(
 						ctx,
 						resolved,
-						MERGE,
+						buildMergePrompt(cfg),
 						`PRIOR SUMMARY:\n${prior || "(empty)"}\n\nNOTES:\n${note}`,
 						{ maxTokens: 2048 },
 					),
@@ -721,7 +828,7 @@ export class Memorizer {
 					await runModel(
 						ctx,
 						resolved,
-						VERIFY,
+						buildVerifyPrompt(cfg),
 						`TRANSCRIPT:\n${deltaText}\n\nNOTE:\n${note}`,
 						{ maxTokens: 2048 },
 					),
@@ -772,11 +879,12 @@ export class Memorizer {
 		// to finish processing. The widget counters refresh in the background later.
 		await this.deps.client.retain(note, {
 			tags: [cfg.bankId, "agent-summary"],
+			// Stable id → re-ingesting the same window upserts instead of duplicating.
+			documentId: docId,
 			// `context` is injected directly into Hindsight's fact-extraction prompt and
 			// shapes HOW facts are pulled from this document — the API docs call it one of
 			// the highest-leverage quality levers. Describe what the report actually is.
-			context:
-				"Curated long-term engineering notes from a pair-programming session between a software engineer and their AI coding agent on one software project. Every line is already-distilled durable knowledge, so treat each as an established fact about this project, not chit-chat or momentary state. Categories: architectural and design decisions with rationale; standing user constraints and preferences; verified know-how (commands, procedures, fixes that worked); pitfalls (approaches tried that failed, and why); and concrete facts and locations (file paths, endpoints, config keys, ports, env-var names). Record where secrets live, never their values.",
+			context: `Curated long-term engineering notes from a pair-programming session between a software engineer and their AI coding agent on one software project. Every line is already-distilled durable knowledge, so treat each as an established fact about this project, not chit-chat or momentary state. Categories: architectural and design decisions with rationale; standing user constraints and preferences; verified know-how (commands, procedures, fixes that worked); pitfalls (approaches tried that failed, and why); and concrete facts and locations (file paths, endpoints, config keys, ports, env-var names). Record where secrets live, never their values. The note is written in ${cfg.memoryLanguage}.`,
 			async: true,
 		});
 		appendDebug(cwd, "memorize.retain.done", {
@@ -791,7 +899,7 @@ export class Memorizer {
 				await runModel(
 					ctx,
 					resolved,
-					SUMMARIZE,
+					buildSummarizePrompt(cfg),
 					`PREVIOUS:\n${prior || "(empty)"}\n\nNEW NOTE:\n${note}`,
 					{ maxTokens: cfg.summaryMaxTokens },
 				),

@@ -20,6 +20,12 @@ export interface RetainOptions {
 	metadata?: Record<string, string>;
 	/** Process asynchronously on the server side. */
 	async?: boolean;
+	/**
+	 * Stable document id for upsert semantics: when it matches an existing
+	 * document the bank deletes that document and its facts, then re-extracts.
+	 * Omitted → server assigns a random UUID (duplicates on re-ingest).
+	 */
+	documentId?: string;
 }
 
 export interface RecallOptions {
@@ -163,6 +169,30 @@ export class HindsightClient {
 		);
 	}
 
+	/** GET /v1/{ns}/banks/{bank}/config — resolved config plus explicit overrides. */
+	async getBankConfig(signal?: AbortSignal): Promise<unknown> {
+		return this.request(
+			"GET",
+			`${this.bankBase()}/config`,
+			undefined,
+			signal,
+			5000,
+		);
+	}
+
+	/** PATCH /v1/{ns}/banks/{bank}/config — update only the provided keys. */
+	async updateBankConfig(
+		updates: Record<string, unknown>,
+		signal?: AbortSignal,
+	): Promise<unknown> {
+		return this.request(
+			"PATCH",
+			`${this.bankBase()}/config`,
+			{ updates },
+			signal,
+		);
+	}
+
 	/** POST /v1/{ns}/banks/{bank}/memories — store a single memory item. */
 	async retain(
 		content: string,
@@ -175,6 +205,7 @@ export class HindsightClient {
 			tags: opts.tags,
 			metadata: opts.metadata,
 			timestamp: new Date().toISOString(),
+			document_id: opts.documentId,
 		};
 		return this.request(
 			"POST",
@@ -183,6 +214,24 @@ export class HindsightClient {
 			signal,
 			30000,
 		);
+	}
+
+	/**
+	 * DELETE /v1/{ns}/banks/{bank}/documents/{doc_id} — remove a document and
+	 * its extracted memories. Tolerates 404 (already gone).
+	 */
+	async deleteDocument(docId: string, signal?: AbortSignal): Promise<void> {
+		try {
+			await this.request(
+				"DELETE",
+				`${this.bankBase()}/documents/${encodeURIComponent(docId)}`,
+				undefined,
+				signal,
+			);
+		} catch (err) {
+			if (err instanceof HindsightError && err.status === 404) return;
+			throw err;
+		}
 	}
 
 	/** POST /v1/{ns}/banks/{bank}/reflect — Hindsight synthesized answer. */

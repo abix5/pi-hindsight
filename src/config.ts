@@ -60,6 +60,12 @@ export interface HindsightConfig {
 	memorizeEngine: "inline" | "taskflow";
 	/** Name of the taskflow flow to launch in "taskflow" engine mode. */
 	flowName: string;
+	/** Language every stored memory is written in (free-form name/code, e.g. "en", "ru", "russian"). */
+	memoryLanguage: string;
+	/** Bank extraction lever: what durable knowledge the retain pipeline should keep. Synced to the bank's retain_mission at startup. */
+	retainMission: string;
+	/** Bank extraction lever: what qualifies as a stable observation. Synced to the bank's observations_mission at startup. */
+	observationsMission: string;
 	/**
 	 * Fraction of the working model's context window used for a single delta chunk's
 	 * input. The rest is reserved for the instruction and the model's output.
@@ -71,6 +77,8 @@ export interface HindsightConfig {
 	priorSummaryPath: string;
 	/** Durable JSONL operation log for /mem-log. */
 	logPath: string;
+	/** Append-only JSONL of dispatched memorize windows (docId → window), for /mem-resave upsert cleanup. */
+	dispatchLogPath: string;
 	/** Background poll interval (ms) for refreshing widget doc/fact counters. */
 	countsRefreshMs: number;
 	/** Verbose debug logging (full prompts + HTTP bodies) to .pi/hindsight/debug.log. Off by default (may leak sensitive data). */
@@ -152,10 +160,14 @@ function readProjectOverrides(cwd: string): Partial<HindsightConfig> {
 			"autoRecall",
 			"memorizeEngine",
 			"flowName",
+			"memoryLanguage",
+			"retainMission",
+			"observationsMission",
 			"chunkInputFraction",
 			"deltaDir",
 			"priorSummaryPath",
 			"logPath",
+			"dispatchLogPath",
 			"countsRefreshMs",
 			"debug",
 		]);
@@ -200,11 +212,21 @@ export function loadConfig(cwd: string): HindsightConfig {
 				? "taskflow"
 				: "inline",
 		flowName: process.env.HINDSIGHT_FLOW_NAME ?? "memory-fill",
+		memoryLanguage: process.env.HINDSIGHT_MEMORY_LANGUAGE ?? "en",
+		retainMission:
+			process.env.HINDSIGHT_RETAIN_MISSION ??
+			"Focus on durable engineering knowledge that changes future behavior: decisions with their rationale, standing user constraints and preferences, verified procedures and commands, failed approaches with the reason they failed, and concrete project facts (paths, endpoints, config keys, env-var names). Ignore session narration, status updates, plans, greetings, and one-off task chatter.",
+		observationsMission:
+			process.env.HINDSIGHT_OBSERVATIONS_MISSION ??
+			"Observations are stable engineering facts about this project and its owner's working preferences: architecture decisions still in force, standing constraints, recurring workflows, verified tooling know-how, and known dead-ends. Exclude one-off events, session narration, and completed task goals.",
 		chunkInputFraction: envFloat("HINDSIGHT_CHUNK_INPUT_FRACTION", 0.5),
 		deltaDir: process.env.HINDSIGHT_DELTA_DIR ?? ".pi/hindsight/delta",
 		priorSummaryPath:
 			process.env.HINDSIGHT_PRIOR_SUMMARY ?? ".pi/hindsight/prior-summary.md",
 		logPath: process.env.HINDSIGHT_LOG_PATH ?? ".pi/hindsight/log.jsonl",
+		dispatchLogPath:
+			process.env.HINDSIGHT_DISPATCH_LOG_PATH ??
+			".pi/hindsight/dispatch-log.jsonl",
 		countsRefreshMs: envInt("HINDSIGHT_COUNTS_REFRESH_MS", 20000),
 		debug: envBool("HINDSIGHT_DEBUG", false),
 	};

@@ -99,7 +99,11 @@ const EXTRACT_BAR = `High bar, inspired by self-learning golden paths:
 - Prefer hard-won learnings: worked only after several tries, non-obvious tooling, project-specific facts, recurring operational workflow, or explicit "remember this".
 - For procedures, include the verification/check that proved it worked when present.
 - For pitfalls, name the failure/dead-end and why it failed when present.
-- State each point ONCE, in its most specific and retrievable form.`;
+- State each point ONCE, in its most specific and retrievable form.
+
+FUTURE-VALUE TEST: Include a bullet ONLY if a future agent knowing it would act differently: skip a re-discovery, avoid a repeated failure, respect a standing constraint, or find something faster. Narrating what happened in the session is NOT memory.
+
+Most transcript fragments contain NOTHING durable. Outputting NONE is a common, correct outcome — never invent or pad bullets to have something to return.`;
 
 const EXTRACT_REJECTS = `Hard rejects — NEVER store these:
 - Assistant plans, promises, or status updates ("I will check", "I added logging", "next run this command").
@@ -110,7 +114,15 @@ const EXTRACT_REJECTS = `Hard rejects — NEVER store these:
 - Speculation or inferred facts not explicitly supported by the fragment.
 
 Each bullet must be self-contained and phrased as durable memory, not as a chat reply.
-Bad: "Ask the user to run tail -n 80 .pi/hindsight/debug.log."
+Never store hedged wording: a bullet containing "possibly / seems / or maybe / или / кажется / возможно" (or similar hedges) must be dropped or made definite from the transcript.
+
+Bad (never store):
+- "README.md updated with write triggers, two pointers + /mem-remember, command table, install section." — status report.
+- "Updates implemented: savedIds and pruning logic in memorize.ts; runtime state, gates, turn_end hook." — change-log.
+- "The assistant plans to review the memory plugin and propose improvements." — plan.
+- "User goal is to rename Hindsight commands from hindsight-* to mem-* prefix." — completed one-off task.
+- "The real memory documents are stored in .pi/hindsight.json or in the corresponding storage." — vague/hedged.
+
 Good: "Pitfalls: If pi-hindsight docs do not increase after compact, inspect .pi/hindsight/debug.log for memorize.retain.* and http.* stages."
 
 If there is nothing durable and reusable, output exactly: NONE`;
@@ -129,14 +141,26 @@ export function buildExtractPrompt(cfg: HindsightConfig): string {
 	const banBlock = bans
 		? `\n\nNEVER extract anything whose only home is one of these EXCLUDED categories: ${bans}. Drop such content entirely, even if it looks durable.`
 		: "";
-	return `${EXTRACT_INTRO}\n\n${catBlock}${banBlock}\n\n${EXTRACT_BAR}\n\n${EXTRACT_REJECTS}`;
+	return `${EXTRACT_INTRO}\n\n${catBlock}${banBlock}\n\n${EXTRACT_BAR}\n\n${EXTRACT_REJECTS}\n\n${languageRule(cfg.memoryLanguage)}`;
+}
+
+/**
+ * LANGUAGE rule appended to every write-path prompt so all stored memory is
+ * written in ONE configured language, regardless of the transcript's language.
+ */
+function languageRule(language: string): string {
+	return `LANGUAGE: Write every bullet in ${language}, regardless of the transcript's language. Keep code identifiers, paths, and commands verbatim.`;
 }
 
 /**
  * Merge prose notes across chunks and drop anything already known
  * (present in the prior rolling summary). Output is prose, not JSON.
  */
-export const MERGE = `You merge several harvested memory notes into ONE clean durable project-memory note.
+export function buildMergePrompt(cfg: HindsightConfig): string {
+	return `${MERGE}\n\n${languageRule(cfg.memoryLanguage)}`;
+}
+
+const MERGE = `You merge several harvested memory notes into ONE clean durable project-memory note.
 You are given: (1) a PRIOR SUMMARY already stored, (2) one or more NOTES.
 Output plain prose bullets grouped under the SAME heading labels that appear in the NOTES (do not invent new categories).
 
@@ -152,7 +176,11 @@ Keep only reusable memory a future agent should know. Drop:
 Do not add anything new. If nothing durable remains, output exactly: NONE`;
 
 /** Fact-check the prose note against the transcript; drop unsupported bullets. */
-export const VERIFY = `You are the final quality gate before writing to long-term memory.
+export function buildVerifyPrompt(cfg: HindsightConfig): string {
+	return `${VERIFY}\n\n${languageRule(cfg.memoryLanguage)}`;
+}
+
+const VERIFY = `You are the final quality gate before writing to long-term memory.
 Given the source transcript and a NOTE, return the note with bad bullets removed.
 Keep wording of kept bullets identical.
 
@@ -169,7 +197,11 @@ Keep bullets that capture durable, reusable project knowledge under their existi
 If every bullet should be removed, output exactly: NONE`;
 
 /** Rewrite the rolling prior-summary as prior + the newly stored note, compact. */
-export const SUMMARIZE = `You maintain a compact rolling summary of stored project memory.
+export function buildSummarizePrompt(cfg: HindsightConfig): string {
+	return `${SUMMARIZE}\n\n${languageRule(cfg.memoryLanguage)}`;
+}
+
+const SUMMARIZE = `You maintain a compact rolling summary of stored project memory.
 Given the previous summary and the newly stored note, output an updated summary that
 covers both, deduplicated and concise (well under 6000 tokens). Plain prose, grouped under
 the same heading labels used in the note. No preamble.`;

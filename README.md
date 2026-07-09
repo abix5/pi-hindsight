@@ -68,9 +68,47 @@ The write is a deterministic [taskflow](https://github.com/earendil-works/pi)
 4. **store** *(script)* — `curl`-POSTs the surviving report to the bank
    (`async`), then deletes the scratch file.
 
+Every write carries a **deterministic `document_id`** derived from the session
+and the exact transcript window (`pi-` + sha256 of session + first/last entry
+id). Re-ingesting the same window — a retried flow, a repeated flush — *upserts*
+the existing document in the bank instead of piling up duplicates. Each
+dispatched window is also recorded in an append-only journal
+(`.pi/hindsight/dispatch-log.jsonl`), which is what lets `/mem-resave` first
+**delete** this session's previously stored documents from the bank and then
+re-collect the whole session cleanly — no duplicate facts, however the windows
+were cut before.
+
+On startup the extension also syncs two **extraction levers onto the bank
+itself** (`retain_mission` and `observations_mission` via the bank config API):
+plain-language missions that steer Hindsight's own fact extraction and
+observation consolidation toward durable engineering knowledge (decisions +
+rationale, constraints, verified know-how, pitfalls, concrete locations) and
+away from session narration and one-off task chatter. The sync is a no-op when
+the bank already matches.
+
 Bank I/O lives in the **script** phases (plain `curl`), not in subagents — so it
 never depends on a subagent having the right tools, and no model sits in the
 write path to derail it.
+
+### Review (`/mem-review`)
+
+Documents are stored to the bank **immediately** (so dedup and recall always
+work against fresh knowledge), and every stored document is also placed in a
+**global review queue** (`~/.pi/hindsight/review-queue.jsonl`, shared across
+all projects). `/mem-review` starts a small local web UI (127.0.0.1, ephemeral
+port, opened in your browser) where you can go through everything the agent has
+written — across every project — and:
+
+- **Approve** — you are done with it; removes it from the queue (the bank is
+  untouched).
+- **Edit** — fix the text in place; the document is re-stored under the *same*
+  `document_id`, so the bank replaces the old facts with the corrected ones.
+- **Delete** — remove the document and its facts from the bank entirely.
+
+Queue entries whose document never made it to the bank (a run that produced
+nothing durable) are dropped automatically. The queue is an append-only event
+log, so parallel pi sessions can write to it safely; `/mem-review stop` shuts
+the server down (it also closes on session end).
 
 ### Pointers & `/mem-remember`
 
@@ -216,6 +254,10 @@ Settings are read from environment variables, then overridden by
 | `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (LLM-picked) or `off` |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
 | `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent context budget for the query |
+| `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim) |
+| `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
+| `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
+| `dispatchLogPath` | `HINDSIGHT_DISPATCH_LOG_PATH` | `.pi/hindsight/dispatch-log.jsonl` | Journal of stored documents (powers `/mem-resave` cleanup) |
 | `countsRefreshMs` | `HINDSIGHT_COUNTS_REFRESH_MS` | `20000` | Widget counter refresh interval |
 | `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging (full prompts/bodies) — **may leak sensitive data** |
 
@@ -229,7 +271,8 @@ Settings are read from environment variables, then overridden by
 | Command | What it does |
 | --- | --- |
 | `/mem-save` | Save the accumulated context to memory now |
-| `/mem-resave` | Re-collect the **whole** session (ignore the pointer) |
+| `/mem-resave` | Re-collect the **whole** session (deletes this session's previously stored documents first, then re-ingests) |
+| `/mem-review [stop]` | Open the browser review UI — approve / edit / delete stored documents across all projects |
 | `/mem-remember <prompt>` | Have the agent study something and store it now |
 | `/mem-recall <query>` | Ad-hoc search of the memory bank |
 | `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing) |
@@ -259,10 +302,22 @@ failed), and non-obvious facts & locations (paths, endpoints, env-var *names*,
 ports).
 
 Never stored: code diffs or raw tool output, assistant chatter, unexecuted
-plans, transient details (line numbers, timestamps, run ids), or **secret
-values** — only *where* a secret lives (env-var name, config path) is kept.
+plans, status updates ("README updated…", "I will check…"), completed one-off
+task goals, hedged guesses, transient details (line numbers, timestamps, run
+ids), or **secret values** — only *where* a secret lives (env-var name, config
+path) is kept.
 
-The `dedup` phase means the same fact is not stored twice, even across sessions.
+Every candidate bullet must pass a **future-value test**: it is stored only if
+a future agent knowing it would act differently — skip a re-discovery, avoid a
+repeated failure, respect a standing constraint, or find something faster.
+Most transcript slices contain nothing durable, and an empty result is a
+normal outcome, not a failure.
+
+All memory is written in one configured language (`memoryLanguage`, default
+English) regardless of the conversation's language, so the same fact never
+exists in two tongues and semantic search stays sharp. The `dedup` phase and
+deterministic `document_id`s mean the same fact is not stored twice, even
+across sessions.
 
 ### Fact categories (`/mem-types`)
 
