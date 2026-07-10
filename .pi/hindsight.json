@@ -2,7 +2,7 @@
   "bankId": "pi-hindsight",
   "autoRecall": true,
   "autoMemorize": true,
-  "memorizeEngine": "taskflow",
+  "memorizeEngine": "inline",
   "retainModelId": "proxy/deepseek-v4-flash",
   "recallModelId": "proxy/deepseek-v4-flash",
   "recallOperation": "recall",

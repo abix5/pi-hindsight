@@ -24,11 +24,13 @@ import { appendDebug, appendLog } from "./log.ts";
 import { type ResolvedModel, resolveModel, runModel } from "./model.ts";
 import { extractionSections } from "./categories.ts";
 import {
+	buildDedupPrompt,
 	buildExtractPrompt,
 	buildMergePrompt,
 	buildSummarizePrompt,
 	buildVerifyPrompt,
 } from "./prompts.ts";
+import { extractHits, normalizeLine } from "./recall-utils.ts";
 import {
 	computeDocId,
 	loadState,
@@ -866,6 +868,74 @@ export class Memorizer {
 				"memory skipped: note was assistant chatter, not reusable memory",
 			);
 			return "blocked";
+		}
+
+		// Cross-document dedup against the bank. This is the ONE thing document_id
+		// cannot provide: the deterministic id only stops the SAME window from
+		// duplicating on re-ingest; it does NOTHING for the same fact recurring
+		// across different windows/sessions. So we recall what the bank already
+		// knows on this note's topic and drop bullets already stored anywhere.
+		// This recall is a plain HTTP call (client.recall) — it creates NO
+		// conversation turn, so the pipeline stays invisible / off-conversation.
+		try {
+			const noteCharsBefore = note.length;
+			appendDebug(cwd, "memorize.dedup.start", { noteCharsBefore });
+			const recall = await this.deps.client.recall(
+				note,
+				{ maxTokens: 1500, budget: "mid", preferObservations: true },
+				ctx.signal,
+			);
+			// Collect the recalled fact texts, dedupe by normalized line, and cap the
+			// count to keep the dedup prompt bounded.
+			const seen = new Set<string>();
+			const facts: string[] = [];
+			for (const hit of extractHits(recall)) {
+				const key = normalizeLine(hit.text);
+				if (!key || seen.has(key)) continue;
+				seen.add(key);
+				facts.push(hit.text);
+				if (facts.length >= 60) break;
+			}
+			if (facts.length === 0) {
+				// Bank knows nothing on this topic → nothing to dedup against. Keep the
+				// note unchanged (do NOT spend a model call).
+				appendDebug(cwd, "memorize.dedup.skip_empty", {});
+			} else {
+				const existing = facts.map((f) => `- ${f}`).join("\n");
+				const deduped = cleanProse(
+					await runModel(
+						ctx,
+						resolved,
+						buildDedupPrompt(cfg),
+						`EXISTING MEMORY:\n${existing}\n\nNOTE:\n${note}`,
+						{ maxTokens: 2048 },
+					),
+				);
+				appendDebug(cwd, "memorize.dedup.done", {
+					existingFacts: facts.length,
+					noteCharsBefore,
+					noteCharsAfter: deduped.length,
+				});
+				if (!deduped.trim()) {
+					// The whole note is already known — nothing new to store.
+					this.deps.status.memoBlocked();
+					appendLog(cwd, cfg.logPath, {
+						type: "retain",
+						reason: "inline: dedup found nothing new",
+						chunks: chunks.length,
+						documents: 0,
+						lines: 0,
+					});
+					this.notify(ctx, "memory skipped: everything already in the bank");
+					return "blocked";
+				}
+				note = deduped;
+			}
+		} catch (err) {
+			// Never lose data because dedup flaked: keep the pre-dedup note.
+			appendDebug(cwd, "memorize.dedup.error", {
+				error: (err as Error).message,
+			});
 		}
 
 		// The CODE makes the API call: store the prose as ONE document.

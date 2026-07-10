@@ -46,29 +46,37 @@ Two operations are supported:
 - `reflect` — ask Hindsight to compose a direct answer from the bank, used only
   for self-contained factual questions.
 
-### Memorize (write path — taskflow)
+### Memorize (write path)
 
 Triggered on context compaction, the manual `/mem-save` command, and — as a
 last-chance safety net — when a session is **quit or replaced by `/new`** (so an
 un-memorized tail is not lost). It is **never** triggered by `/reload` (nothing
 is lost there). Compaction and manual writes are fire-and-forget (the agent
-never waits); the session-close write runs inline and is awaited before the
-process exits, bounded by a 60s cap so quitting can never hang.
+never waits); the session-close write is awaited before the process exits,
+bounded by a 60s cap so quitting can never hang.
 
-The write is a deterministic [taskflow](https://github.com/earendil-works/pi)
-(`taskflows/memory-fill.json`) with four phases:
+There are two engines (`memorizeEngine`):
 
-1. **build** *(agent)* — reads the compacted delta and writes a short, extractive
-   *report* of durable knowledge (decisions + rationale, constraints, verified
-   know-how, pitfalls, facts & locations). Emits `NONE` if nothing is durable.
-2. **stage** *(script)* — writes the report to a per-run file and queries the
-   bank via `curl` for anything already stored on the topic.
-3. **dedup** *(agent)* — drops every bullet already present in the bank, keeps
-   only what is new or changed.
-4. **store** *(script)* — `curl`-POSTs the surviving report to the bank
-   (`async`), then deletes the scratch file.
+**`inline` (default).** The whole pipeline — distil → merge → verify →
+**bank-aware dedup** → store — runs *inside the extension* via isolated model
+completions and a direct bank write. It is **invisible to the conversation**:
+no agent turn is triggered, nothing is injected into the chat, and the main
+model never reacts to it. The bank-aware dedup step is essential: it recalls
+what the bank already knows on the note's topic and drops bullets already
+stored **anywhere** — the cross-document deduplication that `document_id`
+*cannot* provide (the id only stops the same window from duplicating on
+re-ingest, not the same fact recurring across different windows/sessions).
 
-Every write carries a **deterministic `document_id`** derived from the session
+**`taskflow` (opt-in).** A deterministic
+[taskflow](https://github.com/earendil-works/pi) (`taskflows/memory-fill.json`)
+with four phases — **build** *(agent)* → **stage** *(script: recall)* →
+**dedup** *(agent)* → **store** *(script: curl)*. Bank I/O lives in the script
+phases, so it never depends on a subagent having the right tools. Choose this
+only if you want the write to show its progress live in the chat; note that it
+necessarily routes through an agent turn, so it does add entries to the
+conversation context.
+
+Every write (either engine) carries a **deterministic `document_id`** derived from the session
 and the exact transcript window (`pi-` + sha256 of session + first/last entry
 id). Re-ingesting the same window — a retried flow, a repeated flush — *upserts*
 the existing document in the bank instead of piling up duplicates. Each
@@ -85,10 +93,6 @@ observation consolidation toward durable engineering knowledge (decisions +
 rationale, constraints, verified know-how, pitfalls, concrete locations) and
 away from session narration and one-off task chatter. The sync is a no-op when
 the bank already matches.
-
-Bank I/O lives in the **script** phases (plain `curl`), not in subagents — so it
-never depends on a subagent having the right tools, and no model sits in the
-write path to derail it.
 
 ### Review (`/mem` → Review tab)
 
@@ -244,7 +248,7 @@ A typical **global** `~/.pi/agent/hindsight.json`:
 {
   "autoRecall": true,
   "autoMemorize": true,
-  "memorizeEngine": "taskflow",
+  "memorizeEngine": "inline",
   "retainModelId": "your/build-model",
   "recallModelId": "your/recall-model",
   "recallOperation": "recall",
@@ -273,7 +277,7 @@ A typical **global** `~/.pi/agent/hindsight.json`:
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
 | `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle in the `/mem` Settings tab) |
-| `memorizeEngine` | `HINDSIGHT_MEMORIZE_ENGINE` | `inline` | `taskflow` (recommended) or `inline` |
+| `memorizeEngine` | `HINDSIGHT_MEMORIZE_ENGINE` | `inline` | `inline` (off-conversation, default) or `taskflow` (visible in-chat progress) |
 | `recallModelId` | `HINDSIGHT_RECALL_MODEL` | pi default | Cheap model for query-building / filtering |
 | `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | pi default | Model for the inline write pipeline |
 | `recallOperation` | `HINDSIGHT_RECALL_OPERATION` | `recall` | `recall` (facts) or `reflect` (answer) |
@@ -290,8 +294,10 @@ A typical **global** `~/.pi/agent/hindsight.json`:
 | `countsRefreshMs` | `HINDSIGHT_COUNTS_REFRESH_MS` | `20000` | Widget counter refresh interval |
 | `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging (full prompts/bodies) — **may leak sensitive data** |
 
-> The `taskflow` engine uses the models set inside `memory-fill.json`, not
-> `retainModelId`. `retainModelId` only applies to the `inline` engine.
+> The `inline` engine (default) runs entirely off-conversation — no agent turn,
+> no context pollution — and includes the bank-aware cross-document dedup step.
+> It uses `retainModelId`. The `taskflow` engine instead uses the models set
+> inside `memory-fill.json` and routes through an agent turn (visible in chat).
 
 ---
 
