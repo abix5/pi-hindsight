@@ -80,7 +80,7 @@ function countBullets(note: string): number {
 /**
  * Append one dispatch-log record (docId → memorize window) as a single O_APPEND
  * write. Best-effort: a single small `JSON.stringify(...) + "\n"` write is atomic
- * enough for parallel sessions, so we never read-modify-write the file. /mem-resave
+ * enough for parallel sessions, so we never read-modify-write the file. /mem-save all
  * reads it back to delete previously stored documents before re-collecting.
  */
 function appendDispatchLog(
@@ -248,7 +248,7 @@ export class Memorizer {
 		// fromStart ignores the watermark: re-collect the whole session (recovery).
 		const state = loadState(entries);
 		const watermark = fromStart ? undefined : state.watermark;
-		// Entries already stored via /mem-remember are wrapped in ALREADY-SAVED markers
+		// Entries already stored via /mem-retain are wrapped in ALREADY-SAVED markers
 		// below so the extractor does not emit their facts again (even on a full
 		// re-collect, the facts are already in the bank).
 		const savedIds = savedEntryIds(entries, state.savedRanges);
@@ -277,7 +277,7 @@ export class Memorizer {
 		});
 		// Nothing new since the last flush. Make it VISIBLE (a manual flush that
 		// silently does nothing looks broken) and tell the user how to force a
-		// full re-collect. Use /mem-resave to ignore the watermark.
+		// full re-collect. Use /mem-save all to ignore the watermark.
 		if (!deltaText.trim()) {
 			this.deps.status.memoBlocked();
 			appendLog(cwd, cfg.logPath, {
@@ -288,7 +288,7 @@ export class Memorizer {
 			});
 			this.notify(
 				ctx,
-				"nothing new since last flush — memory is up to date (use /mem-resave to re-collect the whole session)",
+				"nothing new since last flush — memory is up to date (use /mem-save all to re-collect the whole session)",
 			);
 			return;
 		}
@@ -332,7 +332,7 @@ export class Memorizer {
 				return;
 			}
 			// Category spec for the flow's build phase: which headings to extract and
-			// which to exclude, from the user's /mem-types config. Best-effort — if it
+			// which to exclude, from the user's fact-category config. Best-effort — if it
 			// cannot be written the flow just falls back to general extraction.
 			const specRel = `spec-${tag}.md`;
 			try {
@@ -361,7 +361,7 @@ export class Memorizer {
 					watermark: lastId,
 					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
 				});
-				// Record the dispatched window so /mem-resave can delete this doc before
+				// Record the dispatched window so /mem-save all can delete this doc before
 				// a full re-collect (best-effort, single O_APPEND write).
 				appendDispatchLog(cwd, cfg.dispatchLogPath, {
 					docId,
@@ -469,7 +469,7 @@ export class Memorizer {
 					watermark: lastId,
 					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
 				});
-				// Record the stored window so /mem-resave can delete this doc before a
+				// Record the stored window so /mem-save all can delete this doc before a
 				// full re-collect (best-effort, single O_APPEND write).
 				appendDispatchLog(cwd, cfg.dispatchLogPath, {
 					docId,

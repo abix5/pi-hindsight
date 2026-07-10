@@ -8,7 +8,7 @@ const DEBUG_PATH = ".pi/hindsight/debug.log";
 // request/response bodies, recalled facts and stored documents, which can leak
 // sensitive project data if the file is shared/committed. index.ts turns it on
 // only when `debug` is enabled in config. The operation log (appendLog) is
-// separate and always on — it powers the /mem-log history UI.
+// separate and always on — it powers the dashboard Log tab and the alt+h history UI.
 let DEBUG_ENABLED = false;
 export function setDebugEnabled(on: boolean): void {
 	DEBUG_ENABLED = on;

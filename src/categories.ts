@@ -83,7 +83,7 @@ export const DEFAULT_CATEGORIES: CategoryDef[] = [
 		clause:
 			"Verified procedures that worked: exact commands, configs, and fixes — the steps, not the diff.",
 		example:
-			"Rebuild Hindsight with `make restart` in the hindsight repo; verify health with /mem-status.",
+			"Rebuild Hindsight with `make restart` in the hindsight repo; verify health in the /mem dashboard Status tab.",
 		def: "on",
 	},
 	{

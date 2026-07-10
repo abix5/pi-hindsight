@@ -73,7 +73,7 @@ and the exact transcript window (`pi-` + sha256 of session + first/last entry
 id). Re-ingesting the same window — a retried flow, a repeated flush — *upserts*
 the existing document in the bank instead of piling up duplicates. Each
 dispatched window is also recorded in an append-only journal
-(`.pi/hindsight/dispatch-log.jsonl`), which is what lets `/mem-resave` first
+(`.pi/hindsight/dispatch-log.jsonl`), which is what lets `/mem-save all` first
 **delete** this session's previously stored documents from the bank and then
 re-collect the whole session cleanly — no duplicate facts, however the windows
 were cut before.
@@ -90,14 +90,15 @@ Bank I/O lives in the **script** phases (plain `curl`), not in subagents — so 
 never depends on a subagent having the right tools, and no model sits in the
 write path to derail it.
 
-### Review (`/mem-review`)
+### Review (`/mem` → Review tab)
 
 Documents are stored to the bank **immediately** (so dedup and recall always
 work against fresh knowledge), and every stored document is also placed in a
 **global review queue** (`~/.pi/hindsight/review-queue.jsonl`, shared across
-all projects). `/mem-review` starts a small local web UI (127.0.0.1, ephemeral
-port, opened in your browser) where you can go through everything the agent has
-written — across every project — and:
+all projects). `/mem` opens a small local web UI (127.0.0.1, ephemeral port,
+in your browser); the **Review** tab has a project navigation sidebar with a
+pending-count per project, and each document expands to show its full text,
+creation date, fact count and trigger — so you can:
 
 - **Approve** — you are done with it; removes it from the queue (the bank is
   untouched).
@@ -107,10 +108,10 @@ written — across every project — and:
 
 Queue entries whose document never made it to the bank (a run that produced
 nothing durable) are dropped automatically. The queue is an append-only event
-log, so parallel pi sessions can write to it safely; `/mem-review stop` shuts
-the server down (it also closes on session end).
+log, so parallel pi sessions can write to it safely; `/mem stop` shuts the
+server down (it also closes on session end).
 
-### Pointers & `/mem-remember`
+### Pointers & `/mem-retain`
 
 Two markers track memory, answering different questions:
 
@@ -118,7 +119,7 @@ Two markers track memory, answering different questions:
   moves forward; the next write resumes right after it. `/mem-mark` advances it
   to now **without writing** (mark everything so far as already processed).
 - **Saved ranges** — *which blocks were already stored out-of-band* by
-  `/mem-remember`. `/mem-remember <prompt>` hands the agent a study task; the
+  `/mem-retain`. `/mem-retain <prompt>` hands the agent a study task; the
   agent gathers what it needs and stores the durable facts immediately (so it
   works even with auto-retain off). The transcript range of that work is
   recorded, and at the next memorize it is wrapped in `ALREADY SAVED` markers so
@@ -199,17 +200,45 @@ to a project:
 4. **Set your models** in the active `memory-fill.json`. The `build` and `dedup`
    phases have `"model": "..."` fields — change them to models you actually have.
 
-5. **Create `.pi/hindsight.json`** (see below), trust the project, then
-   `/reload` in pi.
+5. **Declare a bank** in `.pi/hindsight.json` to activate the plugin here
+   (see below), trust the project, then `/reload` in pi. Without a project
+   bank the plugin stays **dormant** — no recall, no widget — so the loader is
+   safe to keep globally and only wakes up in projects you opt in.
 
-6. Verify the bank connection with `/mem-status`.
+6. Open the dashboard with `/mem` → the **Status** tab confirms the bank
+   connection; the **Settings** tab is where you configure everything visually.
 
 ---
 
 ## Configuration
 
-Settings are read from environment variables, then overridden by
-`.pi/hindsight.json` in the project (handy for hot `/reload`). A typical config:
+Config is merged from three layers, later wins:
+**env defaults → global `~/.pi/agent/hindsight.json` → project `.pi/hindsight.json`**.
+
+Put shared settings (baseUrl, namespace, models, language, missions, effort,
+categories, auto-flags) in the **global** file once, and keep only the
+per-project **bank** (and any project-specific overrides) in the project file.
+The easiest way to edit both is the `/mem` dashboard's **Settings** tab, which
+shows the two layers side by side and writes to the file you choose.
+
+### Activation is gated on a bank
+
+The plugin only runs in a project that declares a bank:
+
+- `"bankId": "my-project"` in the **project** file → active, uses that bank.
+- `"bankId": "auto"` (project **or** global) → active, bank = project folder
+  slug. Set it globally to opt every project in with a folder-derived bank.
+- No bank declared anywhere → **dormant** (a concrete `bankId` set only in the
+  *global* file is ignored on purpose, so all projects never collapse into one
+  shared bank).
+
+A typical **project** file is tiny:
+
+```json
+{ "bankId": "my-project" }
+```
+
+A typical **global** `~/.pi/agent/hindsight.json`:
 
 ```json
 {
@@ -239,25 +268,25 @@ Settings are read from environment variables, then overridden by
 
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
+| `bankId` | `HINDSIGHT_BANK` | — (dormant) | Memory bank id; set it (or `"auto"`) to activate the plugin in a project |
 | `baseUrl` | `HINDSIGHT_BASE_URL` | `http://localhost:8888` | Hindsight API base URL |
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
-| `bankId` | `HINDSIGHT_BANK` | project folder slug | Memory bank id |
-| `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn |
-| `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle per-session with `/mem-auto`) |
+| `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
+| `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle in the `/mem` Settings tab) |
 | `memorizeEngine` | `HINDSIGHT_MEMORIZE_ENGINE` | `inline` | `taskflow` (recommended) or `inline` |
 | `recallModelId` | `HINDSIGHT_RECALL_MODEL` | pi default | Cheap model for query-building / filtering |
 | `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | pi default | Model for the inline write pipeline |
 | `recallOperation` | `HINDSIGHT_RECALL_OPERATION` | `recall` | `recall` (facts) or `reflect` (answer) |
-| `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Recall thoroughness: `light` / `normal` / `thorough` (set via `/mem-effort`) |
+| `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Recall thoroughness: `light` / `normal` / `thorough` (set in the `/mem` Settings tab) |
 | `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
-| `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set via `/mem-types`) |
+| `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set in the `/mem` Settings tab) |
 | `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (LLM-picked) or `off` |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
 | `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent context budget for the query |
 | `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim) |
 | `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
 | `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
-| `dispatchLogPath` | `HINDSIGHT_DISPATCH_LOG_PATH` | `.pi/hindsight/dispatch-log.jsonl` | Journal of stored documents (powers `/mem-resave` cleanup) |
+| `dispatchLogPath` | `HINDSIGHT_DISPATCH_LOG_PATH` | `.pi/hindsight/dispatch-log.jsonl` | Journal of stored documents (powers `/mem-save all` cleanup) |
 | `countsRefreshMs` | `HINDSIGHT_COUNTS_REFRESH_MS` | `20000` | Widget counter refresh interval |
 | `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging (full prompts/bodies) — **may leak sensitive data** |
 
@@ -268,20 +297,20 @@ Settings are read from environment variables, then overridden by
 
 ## Commands & shortcuts
 
+Five commands, plus one browser hub for everything else:
+
 | Command | What it does |
 | --- | --- |
-| `/mem-save` | Save the accumulated context to memory now |
-| `/mem-resave` | Re-collect the **whole** session (deletes this session's previously stored documents first, then re-ingests) |
-| `/mem-review [stop]` | Open the browser review UI — approve / edit / delete stored documents across all projects |
-| `/mem-remember <prompt>` | Have the agent study something and store it now |
-| `/mem-recall <query>` | Ad-hoc search of the memory bank |
-| `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing) |
-| `/mem-auto [on\|off]` | Toggle **both** auto-recall & auto-retain (or `/mem-auto recall\|retain on\|off` for one; bare `/mem-auto` shows state) |
-| `/mem-types` | Pick which fact categories to extract — tri-state checklist (`✓` extract · `○` neutral · `✗` exclude); also `/mem-types <key> on\|off\|ban` |
-| `/mem-effort [light\|normal\|thorough]` | How thorough recall is — how many bank queries / refine rounds it spends |
-| `/mem-log` · `alt+h` | Open the memory operation history |
-| `/mem-status` | Health check, bank, pointer position, and toggle state |
-| `/mem-model [prompt]` | Resolve the small model and run a tiny completion |
+| `/mem [stop]` | Open the **dashboard** in the browser: Review · Settings · Log · Status. This is the single place for configuration, document review, history, and health. Works even when the project is dormant (set a bank in Settings to activate). `/mem stop` closes the server. |
+| `/mem-save [all]` | Save the accumulated context now. `/mem-save all` re-collects the **whole** session (deletes this session's previously stored documents first, then re-ingests). |
+| `/mem-retain <prompt>` | Have the agent study something and store it to the bank now (works even with auto-memorize off). |
+| `/mem-recall <query>` | Ad-hoc search of the memory bank. |
+| `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing). |
+| `alt+h` | Quick in-terminal memory operation history. |
+
+Everything that used to be its own command — auto toggles, fact categories,
+recall effort, status, log, document review — now lives in the `/mem`
+dashboard's tabs.
 
 ### Agent tools
 
@@ -319,7 +348,7 @@ exists in two tongues and semantic search stays sharp. The `dedup` phase and
 deterministic `document_id`s mean the same fact is not stored twice, even
 across sessions.
 
-### Fact categories (`/mem-types`)
+### Fact categories (`/mem` → Settings)
 
 *What* gets harvested is configurable. Each category is **tri-state**:
 
@@ -338,11 +367,11 @@ across sessions.
 | Code map | `○` | Which file/symbol holds what, module responsibilities |
 | Domain knowledge | `○` | External / business facts, terminology |
 
-Add your own from the picker (`+ Add custom type`) or with `/mem-types <key> on`. State lives in
+Edit them in the `/mem` dashboard's **Settings** tab. State lives in
 `.pi/hindsight.json` under `factCategories` and applies to both the inline and
 taskflow write paths.
 
-### Recall effort (`/mem-effort`)
+### Recall effort (`/mem` → Settings)
 
 Recall does not use categories. Instead it turns the user's question plus recent
 context (`recallContextTokens`) into **several** bank queries from different

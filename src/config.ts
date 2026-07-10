@@ -6,6 +6,7 @@
  */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 
 export type Budget = "low" | "mid" | "high";
@@ -20,6 +21,8 @@ export interface HindsightConfig {
 	namespace: string;
 	/** Memory bank id (one per project by default). */
 	bankId: string;
+	/** Whether the plugin should run in this cwd (a bank was explicitly declared). */
+	active: boolean;
 	/** Legacy default model as "provider/id". Used as fallback. */
 	modelId?: string;
 	/** Fast model for recall query-building / model-pick filtering. */
@@ -128,52 +131,63 @@ function defaultBankId(cwd: string): string {
 }
 
 /**
- * Optional project-local overrides read from `.pi/hindsight.json` (trusted project).
- * Convenient for hot `/reload`, where shell env changes are not visible to a
- * running pi process. File values win over env defaults.
+ * Config keys that may be supplied by a global/project override file. Shared by
+ * both `readGlobalOverrides` and `readProjectOverrides` so the two layers accept
+ * exactly the same set of keys. `active` is derived, never file-supplied.
  */
-function readProjectOverrides(cwd: string): Partial<HindsightConfig> {
+export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
+	"baseUrl",
+	"namespace",
+	"bankId",
+	"modelId",
+	"recallModelId",
+	"retainModelId",
+	"summaryMaxTokens",
+	"recallMaxTokens",
+	"recallMaxLines",
+	"recallContextTokens",
+	"recallOperation",
+	"recallEffort",
+	"recallMaxQueries",
+	"factCategories",
+	"recallFilter",
+	"recallBudget",
+	"autoMemorize",
+	"autoRecall",
+	"memorizeEngine",
+	"flowName",
+	"memoryLanguage",
+	"retainMission",
+	"observationsMission",
+	"chunkInputFraction",
+	"deltaDir",
+	"priorSummaryPath",
+	"logPath",
+	"dispatchLogPath",
+	"countsRefreshMs",
+	"debug",
+]);
+
+/** Absolute path of the project-local override file (`<cwd>/.pi/hindsight.json`). */
+export function projectConfigPath(cwd: string): string {
+	return path.join(cwd, ".pi", "hindsight.json");
+}
+
+/** Absolute path of the global override file (`~/.pi/agent/hindsight.json`). */
+export function globalConfigPath(): string {
+	return path.join(os.homedir(), ".pi", "agent", "hindsight.json");
+}
+
+/** Read a JSON override file, keeping only allow-listed keys. Never throws. */
+function readOverridesFile(file: string): Partial<HindsightConfig> {
 	try {
-		const raw = fs.readFileSync(
-			path.join(cwd, ".pi", "hindsight.json"),
-			"utf8",
-		);
-		const obj = JSON.parse(raw) as Record<string, unknown>;
-		const allow = new Set<keyof HindsightConfig>([
-			"baseUrl",
-			"namespace",
-			"bankId",
-			"modelId",
-			"recallModelId",
-			"retainModelId",
-			"summaryMaxTokens",
-			"recallMaxTokens",
-			"recallMaxLines",
-			"recallContextTokens",
-			"recallOperation",
-			"recallEffort",
-			"recallMaxQueries",
-			"factCategories",
-			"recallFilter",
-			"recallBudget",
-			"autoMemorize",
-			"autoRecall",
-			"memorizeEngine",
-			"flowName",
-			"memoryLanguage",
-			"retainMission",
-			"observationsMission",
-			"chunkInputFraction",
-			"deltaDir",
-			"priorSummaryPath",
-			"logPath",
-			"dispatchLogPath",
-			"countsRefreshMs",
-			"debug",
-		]);
+		const obj = JSON.parse(fs.readFileSync(file, "utf8")) as Record<
+			string,
+			unknown
+		>;
 		const out: Partial<HindsightConfig> = {};
 		for (const [k, v] of Object.entries(obj)) {
-			if (allow.has(k as keyof HindsightConfig))
+			if (CONFIG_ALLOW.has(k as keyof HindsightConfig))
 				(out as Record<string, unknown>)[k] = v;
 		}
 		return out;
@@ -182,8 +196,29 @@ function readProjectOverrides(cwd: string): Partial<HindsightConfig> {
 	}
 }
 
+/**
+ * Optional project-local overrides read from `.pi/hindsight.json` (trusted project).
+ * Convenient for hot `/reload`, where shell env changes are not visible to a
+ * running pi process. File values win over env defaults and global overrides.
+ */
+export function readProjectOverrides(cwd: string): Partial<HindsightConfig> {
+	return readOverridesFile(projectConfigPath(cwd));
+}
+
+/**
+ * Optional global overrides read from `~/.pi/agent/hindsight.json`. Apply to
+ * every project; project-local values win over them. Pass an explicit path to
+ * read a different file (used by the self-test). Never throws.
+ */
+export function readGlobalOverrides(
+	file: string = globalConfigPath(),
+): Partial<HindsightConfig> {
+	return readOverridesFile(file);
+}
+
 export function loadConfig(cwd: string): HindsightConfig {
 	const base: HindsightConfig = {
+		active: false,
 		baseUrl: (
 			process.env.HINDSIGHT_BASE_URL ?? "http://localhost:8888"
 		).replace(/\/+$/, ""),
@@ -230,11 +265,64 @@ export function loadConfig(cwd: string): HindsightConfig {
 		countsRefreshMs: envInt("HINDSIGHT_COUNTS_REFRESH_MS", 20000),
 		debug: envBool("HINDSIGHT_DEBUG", false),
 	};
-	return { ...base, ...readProjectOverrides(cwd) };
+	const global = readGlobalOverrides();
+	const project = readProjectOverrides(cwd);
+	return finalizeActivation(
+		{ ...base, ...global, ...project },
+		base,
+		global,
+		project,
+		cwd,
+	);
 }
 
 /**
- * Merge a partial config into `.pi/hindsight.json` and write it back (pretty).
+ * Resolve `bankId` + `active` from the merged config plus the raw layers.
+ *
+ * Activation is gated on an explicitly-declared bank. The declared value is
+ * taken project-first, then env `HINDSIGHT_BANK` (treated as project-level),
+ * then a global `"auto"` — a concrete bankId coming ONLY from the global layer
+ * is deliberately ignored, so one named bank is never shared across projects.
+ *
+ * - explicit name (not "auto") → `bankId = slugify(name)`, `active = true`
+ * - "auto"                     → `bankId = defaultBankId(cwd)`, `active = true`
+ * - nothing declared          → `active = false`, `bankId = defaultBankId(cwd)`
+ */
+function finalizeActivation(
+	merged: HindsightConfig,
+	_base: HindsightConfig,
+	global: Partial<HindsightConfig>,
+	project: Partial<HindsightConfig>,
+	cwd: string,
+): HindsightConfig {
+	const projectBank =
+		typeof project.bankId === "string" ? project.bankId.trim() : "";
+	const envBank = process.env.HINDSIGHT_BANK?.trim() ?? "";
+	let declaredBank: string | undefined;
+	if (projectBank) declaredBank = projectBank;
+	else if (envBank) declaredBank = envBank;
+	else if (global.bankId === "auto") declaredBank = "auto";
+	else declaredBank = undefined;
+
+	let active: boolean;
+	let bankId: string;
+	if (declaredBank && declaredBank !== "auto") {
+		bankId = slugify(declaredBank);
+		active = true;
+	} else if (declaredBank === "auto") {
+		bankId = defaultBankId(cwd);
+		active = true;
+	} else {
+		bankId = defaultBankId(cwd);
+		active = false;
+	}
+	return { ...merged, bankId, active };
+}
+
+/**
+ * Merge a partial config into an override file and write it back (pretty).
+ * Scope selects the target: "project" (`<cwd>/.pi/hindsight.json`, default) or
+ * "global" (`~/.pi/agent/hindsight.json`).
  * Used by /mem-types and /mem-effort to persist runtime changes for next session.
  * Returns true on success. Never throws — a failed write just means the change
  * lives only in the in-memory config until reload.
@@ -242,8 +330,9 @@ export function loadConfig(cwd: string): HindsightConfig {
 export function patchConfigFile(
 	cwd: string,
 	patch: Record<string, unknown>,
+	scope: "project" | "global" = "project",
 ): boolean {
-	const file = path.join(cwd, ".pi", "hindsight.json");
+	const file = scope === "global" ? globalConfigPath() : projectConfigPath(cwd);
 	try {
 		let current: Record<string, unknown> = {};
 		try {

@@ -1,7 +1,7 @@
 /**
  * Global review queue — an append-only event log shared by ALL pi sessions.
  *
- * Every stored document is enqueued here; the /mem-review UI folds the log into
+ * Every stored document is enqueued here; the /mem dashboard Review tab folds the log into
  * the current pending set and lets the user approve / edit / delete each one.
  *
  * WHY append-only: multiple pi sessions run in parallel and all write to this

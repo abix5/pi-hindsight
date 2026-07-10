@@ -95,7 +95,7 @@ export default function (pi: ExtensionAPI) {
 	const status = new HindsightStatus();
 	// Session-level runtime state that commands can flip WITHOUT editing config:
 	// the auto-recall / auto-memorize switches (default from config), and the
-	// pending /mem-remember capture (set by the command, closed on the next
+	// pending /mem-retain capture (set by the command, closed on the next
 	// turn_end to record the stored range).
 	const runtime = {
 		autoRecall: true,
@@ -110,7 +110,7 @@ export default function (pi: ExtensionAPI) {
 		// Stop any in-flight flow watchers too, so an old Memorizer's polling timers
 		// stop writing to the retired widget after a /reload.
 		memorizer?.dispose();
-		// Close the /mem-review HTTP server so a retired instance does not leave a
+		// Close the /mem dashboard HTTP server so a retired instance does not leave a
 		// listening socket behind after a /reload.
 		stopReviewServer();
 		status.clear();
@@ -119,7 +119,9 @@ export default function (pi: ExtensionAPI) {
 	// Refresh the widget doc/fact counters in the background. retain is async on
 	// the server, so counts settle a little after a write — poll instead of blocking.
 	const refreshCounts = async () => {
-		if (!client) return;
+		// Inactive projects have no declared bank; skip so a failed stats call cannot
+		// flip the (hidden) widget back on.
+		if (!client || !cfg?.active) return;
 		try {
 			const s = await client.stats();
 			// A successful stats call proves the bank is reachable, so keep the resting
@@ -138,7 +140,10 @@ export default function (pi: ExtensionAPI) {
 		// A fresh Memorizer owns fresh watcher timers; retire the previous one first.
 		memorizer?.dispose();
 		memorizer = new Memorizer({ pi, cfg, client, status });
-		status.setBank(cfg.bankId, cfg.baseUrl);
+		// Gate the widget on activation: with no declared bank, keep the row hidden so
+		// unrelated projects are not cluttered by a memory widget.
+		if (cfg.active) status.setBank(cfg.bankId, cfg.baseUrl);
+		else status.clear();
 		runtime.autoRecall = cfg.autoRecall;
 		runtime.autoMemorize = cfg.autoMemorize;
 		cfg.autoRecall ? status.recallOn() : status.recallOff();
@@ -174,6 +179,12 @@ export default function (pi: ExtensionAPI) {
 		});
 		status.attach(ctx.ui);
 		if (!cfg || !client) return;
+		// Inactive project (no declared bank): do NOT ensureBank / sync missions /
+		// count / notify. Just hide the widget and bail — this is not an error.
+		if (!cfg.active) {
+			status.clear();
+			return;
+		}
 		status.bankChecking();
 		try {
 			await client.ensureBank();
@@ -224,7 +235,7 @@ export default function (pi: ExtensionAPI) {
 			hasClient: !!client,
 		});
 		status.attach(ctx.ui);
-		if (!runtime.autoRecall || !cfg || !client) {
+		if (!runtime.autoRecall || !cfg || !client || !cfg.active) {
 			status.recallOff();
 			return;
 		}
@@ -297,12 +308,12 @@ export default function (pi: ExtensionAPI) {
 		status.attach(ctx.ui);
 		// Fire-and-forget: schedule() snapshots the pre-compaction delta synchronously,
 		// and the bank write runs server-side async, so compaction never waits on us.
-		if (runtime.autoMemorize)
+		if (runtime.autoMemorize && cfg?.active)
 			memorizer?.schedule(ctx, "compact", { boundaryId });
 		appendDebug(cwd, "event.session_before_compact.done");
 	});
 
-	// Close out a /mem-remember capture: the command recorded the entry id BEFORE
+	// Close out a /mem-retain capture: the command recorded the entry id BEFORE
 	// its study turn; when that turn ends we record (start, end] as a saved range so
 	// the next memorize wraps it in ALREADY-SAVED markers and does not re-extract it.
 	pi.on("turn_end", async (_event, ctx) => {
@@ -345,7 +356,7 @@ export default function (pi: ExtensionAPI) {
 		// Only when the tail is actually abandoned. reload keeps the same transcript
 		// (nothing lost); resume/fork continue it elsewhere.
 		if (event.reason !== "quit" && event.reason !== "new") return;
-		if (!runtime.autoMemorize || !memorizer || !client) return;
+		if (!runtime.autoMemorize || !memorizer || !client || !cfg?.active) return;
 		// On quit the TUI is already stopped, so the widget and message blocks cannot
 		// render — print one plain line so the user knows a write is in progress.
 		if (event.reason === "quit") {

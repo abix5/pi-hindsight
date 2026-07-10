@@ -36,7 +36,7 @@ export function computeDocId(
 
 /**
  * A transcript range whose facts were ALREADY stored to the bank out-of-band
- * (via /mem-remember), bounded by entry ids as (start, end]. When a later
+ * (via /mem-retain), bounded by entry ids as (start, end]. When a later
  * memorize pass includes this range in its delta, those entries are wrapped in
  * ALREADY-SAVED markers so the extractor does not emit their facts a second
  * time. Ephemeral: pruned once the watermark advances past `end`.
@@ -51,7 +51,7 @@ export interface SavedRange {
 export interface HindsightState {
 	/** Id of the last session entry already flushed to memory. */
 	watermark?: string;
-	/** Ranges already stored via /mem-remember, excluded from re-extraction. */
+	/** Ranges already stored via /mem-retain, excluded from re-extraction. */
 	savedRanges?: SavedRange[];
 }
 
@@ -77,7 +77,7 @@ function resolve(cwd: string, rel: string): string {
 
 /**
  * Read the append-only dispatch log and return docIds dispatched for `sessionId`
- * (deduped, order preserved). Used by /mem-resave to delete previously stored
+ * (deduped, order preserved). Used by /mem-save all to delete previously stored
  * documents before a full re-collect. Best-effort: a missing/garbled file or a
  * malformed line is skipped, never thrown.
  */
