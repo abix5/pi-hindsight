@@ -1,6 +1,6 @@
 {
   "name": "@abix5/pi-hindsight",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "private": false,
   "type": "module",
   "description": "pi coding-agent extension: long-term project memory via a local Hindsight instance (recall + memorize)",

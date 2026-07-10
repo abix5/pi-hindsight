@@ -1,5 +1,7 @@
 /** pi-hindsight: long-term project memory over local Hindsight. */
 
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type HindsightConfig, loadConfig } from "./config.ts";
 import { registerCommands } from "./commands.ts";
@@ -47,6 +49,37 @@ function isEphemeralSubagent(): boolean {
 }
 
 /**
+ * True when THIS module is the globally-installed / published copy (its file
+ * lives under a `node_modules` tree), as opposed to a working-tree checkout.
+ */
+function isInstalledCopy(): boolean {
+	try {
+		return import.meta.url.includes("/node_modules/");
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * True when the current project is a DEV checkout of this plugin that loads its
+ * own working-tree source via a local `.pi/extensions/hindsight.ts` loader.
+ * Used so the globally-installed copy stands down here and the dev source wins,
+ * instead of both loading and fighting over the widget (mode toggle: `make dev`
+ * keeps the loader, `make global` renames it away).
+ */
+function localDevLoaderPresent(cwd: string): boolean {
+	try {
+		return (
+			fs.existsSync(path.join(cwd, ".pi", "extensions", "hindsight.ts")) &&
+			fs.existsSync(path.join(cwd, "src", "index.ts")) &&
+			fs.existsSync(path.join(cwd, "src", "memorize.ts"))
+		);
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Process-global disposer for the previous instance. pi can run this extension's
  * factory more than once in the SAME process (a stale copy after `/reload`, or
  * two discovery paths resolving to different file paths). Each run owns its own
@@ -77,6 +110,16 @@ export default function (pi: ExtensionAPI) {
 			/* getState stays undefined; tools then report "not initialized" */
 		}
 		registerTools(pi, getState);
+		return;
+	}
+
+	// Mode guard: when pi opens THIS plugin's own dev checkout, the project's
+	// local `.pi/extensions/hindsight.ts` loads the working-tree source. If the
+	// published package is ALSO installed globally, both copies would load in the
+	// same process and fight over the widget. So the globally-installed copy
+	// stands down whenever a local dev loader is present — the dev source wins.
+	// (`make global` renames the loader away to force the published copy instead.)
+	if (isInstalledCopy() && localDevLoaderPresent(process.cwd())) {
 		return;
 	}
 
