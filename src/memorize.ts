@@ -25,6 +25,7 @@ import { type ResolvedModel, resolveModel, runModel } from "./model.ts";
 import { extractionSections } from "./categories.ts";
 import {
 	buildDedupPrompt,
+	buildDedupQueriesPrompt,
 	buildExtractPrompt,
 	buildMergePrompt,
 	buildSummarizePrompt,
@@ -880,22 +881,37 @@ export class Memorizer {
 		try {
 			const noteCharsBefore = note.length;
 			appendDebug(cwd, "memorize.dedup.start", { noteCharsBefore });
-			// A SINGLE recall of the whole note is not enough: the reranker returns
-			// only the top-N facts most relevant to one big query, so already-stored
-			// facts covering a DIFFERENT bullet's topic never surface and their
-			// duplicates slip through. Mirror the read path instead: query the bank
-			// from MANY angles — the whole note plus one query per bullet — and union
-			// the hits. (Measured on this bank: one query surfaced 23 facts, per-bullet
-			// queries surfaced 135 — 112 already-stored facts the single query missed.)
-			// Each is a plain HTTP recall: no conversation turn, still off-dialogue.
-			const bullets = note
-				.split("\n")
-				.map((l) => l.trim())
-				.filter((l) => /^[-*\u2022]\s+/.test(l))
-				.map((l) => l.replace(/^[-*\u2022]\s+/, ""));
-			// Bound the bank calls: the whole note as a catch-all, then up to 40
-			// per-bullet angles.
-			const queries = [note, ...bullets.slice(0, 40)];
+			// A SINGLE recall of the whole note misses already-stored facts on the
+			// note's other topics (the reranker only returns top-N for one query), so
+			// their duplicates slip through. But one recall PER bullet is wasteful
+			// (dozens of HTTP calls). Instead, let the small model CLUSTER the note by
+			// meaning and emit a few well-formed queries (2-5) — few requests, wide
+			// coverage. This query-build is an isolated completion (no conversation
+			// turn), and so are the recalls, so the whole step stays off-dialogue.
+			let queries: string[] = [note];
+			try {
+				const raw = await runModel(
+					ctx,
+					resolved,
+					buildDedupQueriesPrompt(cfg),
+					`NOTE:\n${note}`,
+					{ maxTokens: 320 },
+				);
+				const parsed: unknown = JSON.parse(raw.trim());
+				if (Array.isArray(parsed)) {
+					const grouped = parsed
+						.filter((q): q is string => typeof q === "string" && q.trim().length > 0)
+						.slice(0, 5);
+					// Whole-note catch-all first, then the grouped topical queries.
+					if (grouped.length) queries = [note, ...grouped];
+				}
+			} catch (err) {
+				// Query-builder flaked (bad JSON / model error): fall back to the single
+				// whole-note recall rather than skipping dedup entirely.
+				appendDebug(cwd, "memorize.dedup.querybuild_error", {
+					error: (err as Error).message,
+				});
+			}
 			const seen = new Set<string>();
 			const facts: string[] = [];
 			// Cap the union so the dedup prompt stays bounded regardless of note size.
