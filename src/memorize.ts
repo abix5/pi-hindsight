@@ -880,21 +880,48 @@ export class Memorizer {
 		try {
 			const noteCharsBefore = note.length;
 			appendDebug(cwd, "memorize.dedup.start", { noteCharsBefore });
-			const recall = await this.deps.client.recall(
-				note,
-				{ maxTokens: 1500, budget: "mid", preferObservations: true },
-				ctx.signal,
-			);
-			// Collect the recalled fact texts, dedupe by normalized line, and cap the
-			// count to keep the dedup prompt bounded.
+			// A SINGLE recall of the whole note is not enough: the reranker returns
+			// only the top-N facts most relevant to one big query, so already-stored
+			// facts covering a DIFFERENT bullet's topic never surface and their
+			// duplicates slip through. Mirror the read path instead: query the bank
+			// from MANY angles — the whole note plus one query per bullet — and union
+			// the hits. (Measured on this bank: one query surfaced 23 facts, per-bullet
+			// queries surfaced 135 — 112 already-stored facts the single query missed.)
+			// Each is a plain HTTP recall: no conversation turn, still off-dialogue.
+			const bullets = note
+				.split("\n")
+				.map((l) => l.trim())
+				.filter((l) => /^[-*\u2022]\s+/.test(l))
+				.map((l) => l.replace(/^[-*\u2022]\s+/, ""));
+			// Bound the bank calls: the whole note as a catch-all, then up to 40
+			// per-bullet angles.
+			const queries = [note, ...bullets.slice(0, 40)];
 			const seen = new Set<string>();
 			const facts: string[] = [];
-			for (const hit of extractHits(recall)) {
-				const key = normalizeLine(hit.text);
-				if (!key || seen.has(key)) continue;
-				seen.add(key);
-				facts.push(hit.text);
-				if (facts.length >= 60) break;
+			// Cap the union so the dedup prompt stays bounded regardless of note size.
+			const maxFacts = 120;
+			for (const q of queries) {
+				if (facts.length >= maxFacts) break;
+				let recall: unknown;
+				try {
+					recall = await this.deps.client.recall(
+						q,
+						{ maxTokens: 800, budget: "mid", preferObservations: true },
+						ctx.signal,
+					);
+				} catch (err) {
+					appendDebug(cwd, "memorize.dedup.query_error", {
+						error: (err as Error).message,
+					});
+					continue;
+				}
+				for (const hit of extractHits(recall)) {
+					const key = normalizeLine(hit.text);
+					if (!key || seen.has(key)) continue;
+					seen.add(key);
+					facts.push(hit.text);
+					if (facts.length >= maxFacts) break;
+				}
 			}
 			if (facts.length === 0) {
 				// Bank knows nothing on this topic → nothing to dedup against. Keep the
@@ -912,6 +939,7 @@ export class Memorizer {
 					),
 				);
 				appendDebug(cwd, "memorize.dedup.done", {
+					queries: queries.length,
 					existingFacts: facts.length,
 					noteCharsBefore,
 					noteCharsAfter: deduped.length,
