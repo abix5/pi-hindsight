@@ -64,7 +64,7 @@ export const DEFAULT_CATEGORIES: CategoryDef[] = [
 		clause:
 			"Choices that were made and the rationale / trade-off behind them (why this over the alternative).",
 		example:
-			"Memorize engine is taskflow, not inline: deterministic bank I/O with no model in the write path.",
+			"Memory engine is inline: extract→verify→retain runs in-process with the small model.",
 		def: "on",
 	},
 	{
@@ -113,7 +113,7 @@ export const DEFAULT_CATEGORIES: CategoryDef[] = [
 		clause:
 			"Code-internal locations: which file/symbol holds what, module responsibilities, signatures.",
 		example:
-			"watchFlowRun lives in src/memorize.ts; seenInjectedFacts lives in src/recall-utils.ts.",
+			"The dedup step lives in src/memorize.ts; seenInjectedFacts lives in src/recall-utils.ts.",
 		def: "off",
 	},
 	{

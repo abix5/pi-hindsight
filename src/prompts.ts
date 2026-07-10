@@ -176,8 +176,8 @@ Keep only reusable memory a future agent should know. Drop:
 Do not add anything new. If nothing durable remains, output exactly: NONE`;
 
 /**
- * Cross-document dedup against the bank. Ports the taskflow `dedup` phase into
- * the inline engine: the deterministic document_id only stops the SAME window
+ * Cross-document dedup against the bank: the deterministic document_id only
+ * stops the SAME window
  * from duplicating on re-ingest; it does nothing for the same fact recurring
  * across different windows/sessions. This prompt reconciles a fresh note against
  * facts already recalled from the bank and drops what is already known.

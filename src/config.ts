@@ -55,14 +55,6 @@ export interface HindsightConfig {
 	/** Feature flags. */
 	autoMemorize: boolean;
 	autoRecall: boolean;
-	/**
-	 * Memorize engine:
-	 * - "inline": run extract→verify→retain in-process with the small model (self-contained).
-	 * - "taskflow": build delta files and ask the agent to launch the memory-fill flow.
-	 */
-	memorizeEngine: "inline" | "taskflow";
-	/** Name of the taskflow flow to launch in "taskflow" engine mode. */
-	flowName: string;
 	/** Language every stored memory is written in (free-form name/code, e.g. "en", "ru", "russian"). */
 	memoryLanguage: string;
 	/** Bank extraction lever: what durable knowledge the retain pipeline should keep. Synced to the bank's retain_mission at startup. */
@@ -154,8 +146,6 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"recallBudget",
 	"autoMemorize",
 	"autoRecall",
-	"memorizeEngine",
-	"flowName",
 	"memoryLanguage",
 	"retainMission",
 	"observationsMission",
@@ -242,11 +232,6 @@ export function loadConfig(cwd: string): HindsightConfig {
 		recallBudget: (process.env.HINDSIGHT_RECALL_BUDGET as Budget) || "mid",
 		autoMemorize: envBool("HINDSIGHT_AUTO_MEMORIZE", true),
 		autoRecall: envBool("HINDSIGHT_AUTO_RECALL", true),
-		memorizeEngine:
-			process.env.HINDSIGHT_MEMORIZE_ENGINE === "taskflow"
-				? "taskflow"
-				: "inline",
-		flowName: process.env.HINDSIGHT_FLOW_NAME ?? "memory-fill",
 		memoryLanguage: process.env.HINDSIGHT_MEMORY_LANGUAGE ?? "en",
 		retainMission:
 			process.env.HINDSIGHT_RETAIN_MISSION ??

@@ -33,31 +33,6 @@ type MemoPhase =
 	| "blocked"
 	| "error";
 
-/**
- * A single snapshot of the memorize pipeline, rendered as the widget's second
- * line with per-step check marks. The extension drives this forward as it
- * observes the dispatched flow's artifacts (built doc, bank write result).
- */
-export type MemoStage = {
-	reason: string;
-	/**
-	 * queued = flow dispatched but its run has not started yet;
-	 * pending = run started, document is being built;
-	 * ok = document built; none = build produced nothing durable.
-	 */
-	doc?: "queued" | "pending" | "ok" | "none";
-	/** reconcile-against-bank step: running while comparing, ok once decided. */
-	clean?: "running" | "ok";
-	/** how many bullets the dedup step dropped as already in the bank. */
-	removed?: number;
-	/**
-	 * bank write: sending = in flight, ok = stored (+1 doc), fail = write error,
-	 * skip = nothing new after dedup (everything was already stored).
-	 */
-	bank?: "ok" | "fail" | "sending" | "skip";
-	note?: string;
-};
-
 function trunc(s: string, n: number): string {
 	return s.length > n ? `${s.slice(0, n)}…` : s;
 }
@@ -217,17 +192,6 @@ export class HindsightStatus {
 		this.lastAction = this.c("dim", `↗ ${reason} → memory`);
 		this.render();
 	}
-	/**
-	 * Drive the second line through the memorize pipeline with per-step check
-	 * marks. The taskflow dispatch is fire-and-forget (the flow runs in a separate
-	 * turn), so we never leave a spinner up — each stage is a settled, styled line.
-	 */
-	memoProgress(stage: MemoStage): void {
-		this.memo.off = false;
-		this.memo.phase = "idle";
-		this.lastAction = this.buildProgress(stage);
-		this.render();
-	}
 	memoExtracting(): void {
 		this.memo.phase = "extracting";
 		this.render();
@@ -285,51 +249,6 @@ export class HindsightStatus {
 
 	private memoLast(): string {
 		return `${this.memo.lastDocs} doc${this.memo.lastDocs === 1 ? "" : "s"} · ${this.memo.lastLines} lines`;
-	}
-
-	/**
-	 * Build the styled second line for a memorize stage. Passed steps get a green
-	 * ✓; a step that failed / produced nothing gets a red ✗; in-flight steps show a
-	 * dim “…” verb. Everything is pre-colored here, so render() emits it verbatim.
-	 */
-	private buildProgress(s: MemoStage): string {
-		const dim = (t: string) => this.c("dim", t);
-		const ok = this.c("success", "✓");
-		const bad = this.c("error", "✗");
-		const sep = dim(" · ");
-		const parts: string[] = [dim(`↗ ${s.reason}`)];
-
-		if (s.doc === "queued") {
-			// Flow handed off but its run has not appeared yet — do NOT imply progress.
-			parts.push(dim("flow queued…"));
-		} else if (s.doc === "pending") {
-			parts.push(dim("building doc…"));
-		} else if (s.doc === "none") {
-			parts.push(`${dim("doc")} ${bad}`);
-		} else if (s.doc === "ok") {
-			parts.push(`${dim("doc")} ${ok}`);
-			if (s.clean === "running") {
-				// Comparing the fresh report against what the bank already holds.
-				parts.push(dim("dedup…"));
-			} else if (s.clean === "ok") {
-				if (s.bank === "skip") {
-					// Everything in the report was already stored — nothing new to write.
-					parts.push(`${dim("dedup")} ${ok}`, dim("nothing new (all known)"));
-				} else {
-					// removed>0: some report bullets were dropped as already-known;
-					// removed==0: nothing to drop, the whole report is new.
-					const n = s.removed ?? 0;
-					parts.push(n > 0 ? dim(`dedup -${n}`) : `${dim("dedup")} ${ok}`);
-					if (s.bank === "sending") parts.push(dim("sending to bank…"));
-					else if (s.bank === "ok")
-						parts.push(`${dim("bank")} ${ok}${dim(" · +1")}`);
-					else if (s.bank === "fail") parts.push(`${dim("bank")} ${bad}`);
-				}
-			}
-		}
-
-		const line = parts.join(sep);
-		return s.note ? `${line} ${dim(`(${s.note})`)}` : line;
 	}
 
 	/** The label shown while memory is actively working, or undefined when idle. */

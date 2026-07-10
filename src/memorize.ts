@@ -8,8 +8,7 @@
  *
  * Steps: collect delta after watermark → deterministic clean → chunk by model
  * window → write chunk files → move watermark → notify main window → run the
- * extract/merge/verify/retain pipeline (inline engine) OR ask the agent to
- * launch the taskflow flow (taskflow engine).
+ * extract/merge/verify/retain pipeline (inline engine).
  */
 
 import * as fs from "node:fs";
@@ -22,7 +21,6 @@ import type { HindsightConfig } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug, appendLog } from "./log.ts";
 import { type ResolvedModel, resolveModel, runModel } from "./model.ts";
-import { extractionSections } from "./categories.ts";
 import {
 	buildDedupPrompt,
 	buildDedupQueriesPrompt,
@@ -158,21 +156,14 @@ function scrubMemoryNote(note: string): string {
 export class Memorizer {
 	private readonly queues = new Map<string, Promise<void>>();
 	private pending = 0;
-	// Active flow-watch poll timers, tracked so dispose() (called on /reload) can
-	// stop them before a replacement Memorizer takes over the widget.
-	private readonly watchers = new Set<ReturnType<typeof setInterval>>();
 
 	constructor(private readonly deps: MemorizeDeps) {}
 
 	/**
-	 * Retire this Memorizer: stop every in-flight flow watcher so its polling
-	 * timers stop updating a widget that a /reload has already replaced. Queued
-	 * memorize jobs are fire-and-forget and left to settle on their own.
+	 * Retire this Memorizer. Queued memorize jobs are fire-and-forget and left
+	 * to settle on their own. Kept as a no-op since index.ts calls it.
 	 */
-	dispose(): void {
-		for (const t of this.watchers) clearInterval(t);
-		this.watchers.clear();
-	}
+	dispose(): void {}
 
 	/** Waiting jobs = everything pending minus the one currently running. */
 	private syncQueue(): void {
@@ -191,7 +182,7 @@ export class Memorizer {
 	schedule(
 		ctx: ExtensionContext,
 		reason: string,
-		opts?: { fromStart?: boolean; boundaryId?: string; forceInline?: boolean },
+		opts?: { fromStart?: boolean; boundaryId?: string },
 	): Promise<void> {
 		const sessionId = ctx.sessionManager.getSessionId() ?? "default";
 		const snapshot = ctx.sessionManager.getEntries();
@@ -213,7 +204,6 @@ export class Memorizer {
 					opts?.fromStart ?? false,
 					snapshot,
 					opts?.boundaryId,
-					opts?.forceInline ?? false,
 				),
 			)
 			.catch((err) => {
@@ -238,10 +228,6 @@ export class Memorizer {
 		fromStart = false,
 		snapshot?: Entries,
 		boundaryId?: string,
-		// forceInline bypasses the taskflow engine and runs the in-process pipeline,
-		// awaited by the caller. Used at session shutdown, where taskflow cannot run
-		// (it needs a future agent turn that will never happen once we are exiting).
-		forceInline = false,
 	): Promise<void> {
 		const { pi, cfg } = this.deps;
 		const cwd = ctx.cwd ?? process.cwd();
@@ -310,118 +296,6 @@ export class Memorizer {
 			docId,
 		});
 
-		// taskflow engine: the whole delta is injected into the flow as CONTEXT.
-		// We write ONE per-run input file (current-<tag>.md), advance the watermark,
-		// and ask the agent to run the flow. No chunking, no model resolution here.
-		if (cfg.memorizeEngine === "taskflow" && !forceInline) {
-			const lastId = windowLastId;
-			// Unique tag correlates OUR run inside taskflow's run records AND names the
-			// per-run input file, so two dispatches (e.g. a manual flush racing a
-			// compact) can never share or overwrite one another's delta.
-			const tag = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-			const deltaRel = `current-${tag}.md`;
-			const deltaFile = path.resolve(cwd, cfg.deltaDir, deltaRel);
-			try {
-				fs.mkdirSync(path.dirname(deltaFile), { recursive: true });
-				fs.writeFileSync(deltaFile, deltaText);
-			} catch (err) {
-				// If we cannot persist the delta, the flow would run against a missing
-				// file and the window would be lost while the watermark advanced. Treat
-				// it as terminal: surface the error, KEEP the watermark, do NOT dispatch.
-				appendDebug(cwd, "memorize.taskflow.write_error", {
-					error: (err as Error).message,
-				});
-				this.deps.status.memoError("could not write delta file");
-				return;
-			}
-			// Category spec for the flow's build phase: which headings to extract and
-			// which to exclude, from the user's fact-category config. Best-effort — if it
-			// cannot be written the flow just falls back to general extraction.
-			const specRel = `spec-${tag}.md`;
-			try {
-				const { headings, bans } = extractionSections(cfg);
-				const specText = `${
-					"EXTRACTION CATEGORIES \u2014 obey exactly.\n\n" +
-					"ENABLED headings (use ONLY these; each becomes a '## <heading>' section; skip one with nothing):\n\n"
-				}${
-					headings ||
-					"(none configured \u2014 extract general durable project knowledge)"
-				}${
-					bans
-						? `\n\nEXCLUDED headings \u2014 NEVER extract anything whose only home is one of these: ${bans}.\n`
-						: "\n"
-				}`;
-				fs.writeFileSync(path.resolve(cwd, cfg.deltaDir, specRel), specText);
-			} catch (err) {
-				appendDebug(cwd, "memorize.taskflow.spec_error", {
-					error: (err as Error).message,
-				});
-			}
-			// Delta is durably on disk, so advance the watermark on dispatch, and drop
-			// any saved ranges this window has now consumed.
-			if (lastId) {
-				saveState(pi, {
-					watermark: lastId,
-					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
-				});
-				// Record the dispatched window so /mem-save all can delete this doc before
-				// a full re-collect (best-effort, single O_APPEND write).
-				appendDispatchLog(cwd, cfg.dispatchLogPath, {
-					docId,
-					sessionId,
-					firstId,
-					lastId,
-					reason,
-				});
-				// Enqueue into the GLOBAL review queue at dispatch time. The flow may
-				// still store nothing (build → NONE); the review UI auto-drops queue
-				// entries whose bank GET returns 404, so an empty doc is harmless.
-				enqueueReview(cwd, cfg, docId, reason);
-			}
-			const dispatchedAt = Date.now();
-			// Stage 0: flow handed off. Shows "flow queued…" for the brief moment
-			// before the triggered turn creates the run record; watchFlowRun then
-			// advances it to "building doc…" as soon as the run appears.
-			this.deps.status.memoProgress({ reason, doc: "queued" });
-			appendDebug(cwd, "memorize.taskflow.dispatch", {
-				reason,
-				flowName: cfg.flowName,
-				lastId,
-				tag,
-				deltaChars: deltaText.length,
-			});
-			appendLog(cwd, cfg.logPath, {
-				type: "retain",
-				reason: `${reason}: taskflow dispatched`,
-				documents: 0,
-				lines: 0,
-			});
-			// Run the flow VISIBLY (no detach) so its progress shows in the chat.
-			// triggerTurn:true STARTS the turn now (via _runAgentPrompt), so the flow
-			// actually executes on its own. We must NOT use deliverAs:"nextTurn": that
-			// only pushes the message onto the pending-next-turn queue and triggers no
-			// turn, so the flow never runs and the widget sticks on "flow queued…".
-			// This call returns void (does not await the turn), so the fire-and-forget
-			// memorize job never blocks compaction.
-			pi.sendMessage(
-				{
-					customType: "mem-write",
-					content:
-						`Store project memory now: use the taskflow tool to run flow \`${cfg.flowName}\` ` +
-						`with args.bank="${cfg.bankId}", args.tag="${tag}", args.baseUrl="${cfg.baseUrl}", ` +
-						`args.namespace="${cfg.namespace}", args.docId="${docId}", args.lang="${cfg.memoryLanguage}". The session delta is already prepared as context ` +
-						`in ${cfg.deltaDir}/${deltaRel}. Run it now and report the stored result. ` +
-						`Do not edit any source files.`,
-					display: true,
-				},
-				{ triggerTurn: true },
-			);
-			// Advance the widget through the pipeline by reading taskflow's OWN run
-			// records (runtime-written, not model-written), matched by our tag.
-			this.watchFlowRun(cwd, reason, tag, dispatchedAt);
-			return;
-		}
-
 		const resolved = resolveModel(ctx, cfg);
 		if (!resolved) {
 			this.deps.status.memoError("model unavailable");
@@ -445,7 +319,6 @@ export class Memorizer {
 			contextWindow: resolved.model.contextWindow,
 			chunks: chunks.length,
 			chunkChars: chunks.map((c) => c.length),
-			engine: cfg.memorizeEngine,
 		});
 		this.deps.status.memoCollecting(chunks.length, reason);
 		writeDeltaChunks(cwd, cfg.deltaDir, chunks);
@@ -501,222 +374,6 @@ export class Memorizer {
 				`memory write error: ${(err as Error).message} — delta kept, will retry on next flush`,
 			);
 		}
-	}
-
-	/**
-	 * Drive the widget's second line from taskflow's OWN run records, which the
-	 * runtime writes deterministically (NOT any model). We locate our run by the
-	 * unique args.tag we passed at dispatch (fallback: newest run created at/after
-	 * dispatch) and translate its phase statuses/outputs into check-marked stages:
-	 *   build running               → building doc…
-	 *   build done, output NONE      → doc ✗ (nothing durable)
-	 *   build done, stage+dedup run  → doc ✓ · dedup…
-	 *   dedup done, output NONE      → doc ✓ · dedup ✓ · nothing new (all known)
-	 *   dedup done, has content      → doc ✓ · dedup -N · sending… (store script)
-	 *   store done                   → doc ✓ · dedup -N · bank ✓ · +1  (or bank ✗)
-	 *   run failed / timed out       → doc ✓/✗ (flow failed / timed out)
-	 * The bank write is done by the flow's `store` script phase, not in code.
-	 * REMOVED:<n> is parsed from the dedup phase output for the -N count.
-	 * The poll is unref'd, bounded, tracked for disposal, and stops on the first
-	 * terminal state.
-	 */
-	private watchFlowRun(
-		cwd: string,
-		reason: string,
-		tag: string,
-		dispatchedAt: number,
-	): void {
-		type PhaseRec = { status?: string; output?: string };
-		type RunRec = {
-			status?: string;
-			createdAt?: number;
-			args?: { tag?: string };
-			phases?: Record<string, PhaseRec>;
-		};
-		const runsDir = path.resolve(
-			cwd,
-			".pi/taskflows/runs",
-			this.deps.cfg.flowName,
-		);
-		const status = this.deps.status;
-		let ticks = 0;
-		const maxTicks = 150; // ~5 min at 2s
-		let sentBuilding = false;
-		let sentCleaning = false;
-		let sentSending = false;
-
-		const readRun = (p: string): RunRec | undefined => {
-			try {
-				return JSON.parse(fs.readFileSync(p, "utf8")) as RunRec;
-			} catch {
-				return undefined;
-			}
-		};
-		// Prefer the run whose args.tag matches ours; otherwise the newest run created
-		// at/after dispatch (tolerant fallback if the tag did not round-trip).
-		const findRun = (): RunRec | undefined => {
-			let files: string[];
-			try {
-				files = fs.readdirSync(runsDir).filter((f) => f.endsWith(".json"));
-			} catch {
-				return undefined;
-			}
-			let fallback: RunRec | undefined;
-			for (const f of files) {
-				const rec = readRun(path.join(runsDir, f));
-				if (!rec) continue;
-				if (rec.args?.tag === tag) return rec;
-				const createdAt = rec.createdAt ?? 0;
-				if (
-					createdAt >= dispatchedAt - 1000 &&
-					createdAt > (fallback?.createdAt ?? 0)
-				)
-					fallback = rec;
-			}
-			return fallback;
-		};
-		const isNone = (s?: string): boolean => {
-			const t = (s ?? "").trim();
-			return t === "" || t.toUpperCase() === "NONE";
-		};
-		// The dedup phase ends its report with a machine-readable `REMOVED: <n>` line.
-		const parseRemoved = (out?: string): number => {
-			const m = /REMOVED:\s*(\d+)/i.exec(out ?? "");
-			return m ? Number(m[1]) : 0;
-		};
-		// Per-run scratch files: the report doc the flow edits, and the delta input
-		// we wrote for it. On any TERMINAL state we delete BOTH here (deterministic)
-		// so a crashed flow can never orphan them; the 24h sweep is only a backstop.
-		// (On timeout we deliberately do NOT delete — the flow may still be reading.)
-		const docFile = path.resolve(
-			cwd,
-			this.deps.cfg.deltaDir,
-			`_doc-${tag}.txt`,
-		);
-		const deltaFile = path.resolve(
-			cwd,
-			this.deps.cfg.deltaDir,
-			`current-${tag}.md`,
-		);
-		const specFile = path.resolve(
-			cwd,
-			this.deps.cfg.deltaDir,
-			`spec-${tag}.md`,
-		);
-		const finish = () => {
-			for (const f of [docFile, deltaFile, specFile]) {
-				try {
-					fs.rmSync(f, { force: true });
-				} catch {
-					/* best-effort cleanup */
-				}
-			}
-			clearInterval(timer);
-			this.watchers.delete(timer);
-		};
-
-		const timer = setInterval(() => {
-			ticks += 1;
-			const rec = findRun();
-			if (rec) {
-				const build = rec.phases?.build;
-				const dedup = rec.phases?.dedup;
-				const store = rec.phases?.store;
-				const removed = parseRemoved(dedup?.output);
-
-				// Build produced nothing durable → no document formed. (terminal)
-				if (build?.status === "done" && isNone(build.output)) {
-					status.memoProgress({
-						reason,
-						doc: "none",
-						note: "nothing durable to store",
-					});
-					finish();
-					return;
-				}
-				// store (script) finished. Its output is the bank HTTP response, or a
-				// 'skipped: ...' line when dedup left nothing new. (terminal)
-				if (store?.status === "done") {
-					const out = store.output ?? "";
-					if (/skipped/i.test(out)) {
-						status.memoProgress({
-							reason,
-							doc: "ok",
-							clean: "ok",
-							bank: "skip",
-						});
-					} else {
-						const ok = /"success"\s*:\s*true/.test(out);
-						status.memoProgress({
-							reason,
-							doc: "ok",
-							clean: "ok",
-							removed,
-							bank: ok ? "ok" : "fail",
-							note: ok ? undefined : "bank did not confirm",
-						});
-					}
-					finish();
-					return;
-				}
-				// Dedup found everything already stored → nothing new; store will skip.
-				// Show it now without waiting for the (no-op) store phase. (terminal)
-				if (dedup?.status === "done" && isNone(dedup.output)) {
-					status.memoProgress({ reason, doc: "ok", clean: "ok", bank: "skip" });
-					finish();
-					return;
-				}
-				// Whole run failed. (terminal)
-				if (rec.status === "failed") {
-					const builtOk = build?.status === "done" && !isNone(build.output);
-					status.memoProgress(
-						builtOk
-							? { reason, doc: "ok", note: "flow failed" }
-							: { reason, doc: "none", note: "flow failed" },
-					);
-					finish();
-					return;
-				}
-				// Progress transitions, each fired once:
-				if (dedup?.status === "done") {
-					// Reconciled against the bank → store (script) is posting the doc.
-					if (!sentSending) {
-						sentSending = true;
-						status.memoProgress({
-							reason,
-							doc: "ok",
-							clean: "ok",
-							removed,
-							bank: "sending",
-						});
-					}
-				} else if (build?.status === "done") {
-					// Build done; stage(recall) + dedup reconciling against the bank.
-					if (!sentCleaning) {
-						sentCleaning = true;
-						status.memoProgress({ reason, doc: "ok", clean: "running" });
-					}
-				} else if (!sentBuilding) {
-					// Run exists and the build is actually in progress now.
-					sentBuilding = true;
-					status.memoProgress({ reason, doc: "pending" });
-				}
-			}
-			if (ticks >= maxTicks) {
-				// Give up watching (the flow may still be running) but never leave the
-				// widget stuck on an in-progress label. Leave the scratch files for the
-				// 24h sweep since the flow could still be reading them.
-				status.memoProgress({
-					reason,
-					doc: "ok",
-					note: "flow watch timed out - check /tf runs",
-				});
-				clearInterval(timer);
-				this.watchers.delete(timer);
-			}
-		}, 2000);
-		timer.unref?.();
-		this.watchers.add(timer);
 	}
 
 	/**
@@ -900,7 +557,9 @@ export class Memorizer {
 				const parsed: unknown = JSON.parse(raw.trim());
 				if (Array.isArray(parsed)) {
 					const grouped = parsed
-						.filter((q): q is string => typeof q === "string" && q.trim().length > 0)
+						.filter(
+							(q): q is string => typeof q === "string" && q.trim().length > 0,
+						)
 						.slice(0, 5);
 					// Whole-note catch-all first, then the grouped topical queries.
 					if (grouped.length) queries = [note, ...grouped];

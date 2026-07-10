@@ -55,32 +55,28 @@ is lost there). Compaction and manual writes are fire-and-forget (the agent
 never waits); the session-close write is awaited before the process exits,
 bounded by a 60s cap so quitting can never hang.
 
-There are two engines (`memorizeEngine`):
+The whole pipeline — distil → merge → verify → **bank-aware dedup** → store —
+runs *inside the extension* via isolated model completions and a direct bank
+write. It is **invisible to the conversation**: no agent turn is triggered,
+nothing is injected into the chat, and the main model never reacts to it. All
+the small-model steps go through a completion API (`complete()`), not a
+conversation turn, so the write never pollutes context.
 
-**`inline` (default).** The whole pipeline — distil → merge → verify →
-**bank-aware dedup** → store — runs *inside the extension* via isolated model
-completions and a direct bank write. It is **invisible to the conversation**:
-no agent turn is triggered, nothing is injected into the chat, and the main
-model never reacts to it. The bank-aware dedup step is essential: it recalls
-what the bank already knows on the note's topic and drops bullets already
-stored **anywhere** — the cross-document deduplication that `document_id`
-*cannot* provide (the id only stops the same window from duplicating on
-re-ingest, not the same fact recurring across different windows/sessions).
+The **bank-aware dedup** step is what keeps facts from piling up. Before storing,
+it asks the small model to cluster the note by meaning into a few standalone
+queries, recalls the bank from those angles, and drops any bullet whose meaning
+is already stored **anywhere** in the bank. This is the cross-document
+deduplication that `document_id` *cannot* provide — the id only stops the same
+transcript window from duplicating on re-ingest, not the same fact recurring
+across different windows or sessions. A single whole-note query misses
+already-stored facts on the note's other topics; grouping into a handful of
+topical queries surfaces far more of them at a bounded number of requests.
 
-**`taskflow` (opt-in).** A deterministic
-[taskflow](https://github.com/earendil-works/pi) (`taskflows/memory-fill.json`)
-with four phases — **build** *(agent)* → **stage** *(script: recall)* →
-**dedup** *(agent)* → **store** *(script: curl)*. Bank I/O lives in the script
-phases, so it never depends on a subagent having the right tools. Choose this
-only if you want the write to show its progress live in the chat; note that it
-necessarily routes through an agent turn, so it does add entries to the
-conversation context.
-
-Every write (either engine) carries a **deterministic `document_id`** derived from the session
+Every write carries a **deterministic `document_id`** derived from the session
 and the exact transcript window (`pi-` + sha256 of session + first/last entry
-id). Re-ingesting the same window — a retried flow, a repeated flush — *upserts*
+id). Re-ingesting the same window — a retried write, a repeated flush — *upserts*
 the existing document in the bank instead of piling up duplicates. Each
-dispatched window is also recorded in an append-only journal
+stored window is also recorded in an append-only journal
 (`.pi/hindsight/dispatch-log.jsonl`), which is what lets `/mem-save all` first
 **delete** this session's previously stored documents from the bank and then
 re-collect the whole session cleanly — no duplicate facts, however the windows
@@ -137,10 +133,6 @@ Two markers track memory, answering different questions:
 
 - **pi coding-agent** (provides the extension runtime, model registry, and host
   packages used by the extension APIs).
-- **pi-taskflow** for the recommended `memorizeEngine: "taskflow"` path. The npm
-  package is installed as a dependency, but the taskflow extension/tool must also
-  be available to pi so the agent can run the `taskflow` tool. Use
-  `memorizeEngine: "inline"` only if you intentionally want no taskflow runtime.
 - A running **Hindsight** HTTP API — by default `http://localhost:8888`,
   namespace `default`. On macOS, the easiest way to get one is
   [**hindsight-setup**](https://github.com/abix5/hindsight-setup).
@@ -148,9 +140,11 @@ Two markers track memory, answering different questions:
   dedup of raw facts superseded by observations). Older servers just ignore the
   flag — no error, but no server-side dedup either.
 - **bun** — the extension runs as TypeScript.
-- **jq** and **curl** on `PATH` — used by the memorize taskflow's script phases.
-- **Two models** available in your pi model registry (one cheap for
-  recall/build, one slightly stronger for dedup). See *Configuration*.
+- **A small model** in your pi model registry for the recall/write pipeline
+  (`recallModelId` / `retainModelId`). A single cheap model is enough. See
+  *Configuration*.
+
+No taskflow, `jq`, or `curl` is needed — the write path runs entirely in-process.
 
 ---
 
@@ -159,16 +153,11 @@ Two markers track memory, answering different questions:
 pi auto-discovers `.pi/extensions/*.ts` in a trusted project. To add pi-hindsight
 to a project:
 
-1. **Install the packages**:
+1. **Install the package**:
 
    ```bash
-   npm install -D @abix5/pi-hindsight pi-taskflow
+   npm install -D @abix5/pi-hindsight
    ```
-
-   `@abix5/pi-hindsight` also declares `pi-taskflow` and the pi runtime packages
-   as dependencies, so npm installs the code needed for module resolution. The
-   explicit `pi-taskflow` install keeps the required pi extension visible in the
-   consuming project.
 
    Or clone it somewhere stable if you prefer local development:
 
@@ -191,25 +180,16 @@ to a project:
    (Running pi *inside this repo* works out of the box — a loader is already
    present.)
 
-3. **Register the taskflow.** Point your project `package.json` at the packaged
-   taskflow directory:
+3. **Set your models** globally in `~/.pi/agent/hindsight.json` (see
+   *Configuration*): `recallModelId` and `retainModelId`. A single cheap model
+   for both is fine.
 
-   ```json
-   { "pi": { "taskflows": ["./node_modules/@abix5/pi-hindsight/taskflows"] } }
-   ```
+4. **Declare a bank** in the project's `.pi/hindsight.json` to activate the
+   plugin here (see below), trust the project, then `/reload` in pi. Without a
+   project bank the plugin stays **dormant** — no recall, no widget — so the
+   loader is safe to keep globally and only wakes up in projects you opt in.
 
-   For a local clone, either copy `taskflows/memory-fill.json` into your
-   project's `.pi/taskflows/`, or point at the clone's `taskflows/` directory.
-
-4. **Set your models** in the active `memory-fill.json`. The `build` and `dedup`
-   phases have `"model": "..."` fields — change them to models you actually have.
-
-5. **Declare a bank** in `.pi/hindsight.json` to activate the plugin here
-   (see below), trust the project, then `/reload` in pi. Without a project
-   bank the plugin stays **dormant** — no recall, no widget — so the loader is
-   safe to keep globally and only wakes up in projects you opt in.
-
-6. Open the dashboard with `/mem` → the **Status** tab confirms the bank
+5. Open the dashboard with `/mem` → the **Status** tab confirms the bank
    connection; the **Settings** tab is where you configure everything visually.
 
 ---
@@ -236,21 +216,17 @@ The plugin only runs in a project that declares a bank:
   *global* file is ignored on purpose, so all projects never collapse into one
   shared bank).
 
-A typical **project** file is tiny:
-
-```json
-{ "bankId": "my-project" }
-```
-
 A typical **global** `~/.pi/agent/hindsight.json`:
 
 ```json
 {
+  "baseUrl": "http://localhost:8888",
+  "namespace": "default",
+  "recallModelId": "your-provider/small-model",
+  "retainModelId": "your-provider/small-model",
+  "memoryLanguage": "en",
   "autoRecall": true,
   "autoMemorize": true,
-  "memorizeEngine": "inline",
-  "retainModelId": "your/build-model",
-  "recallModelId": "your/recall-model",
   "recallOperation": "recall",
   "recallFilter": "model",
   "recallEffort": "normal",
@@ -270,6 +246,12 @@ A typical **global** `~/.pi/agent/hindsight.json`:
 }
 ```
 
+Then each project you want memory in just declares its bank:
+
+```json
+{ "bankId": "my-project" }
+```
+
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `bankId` | `HINDSIGHT_BANK` | — (dormant) | Memory bank id; set it (or `"auto"`) to activate the plugin in a project |
@@ -277,9 +259,8 @@ A typical **global** `~/.pi/agent/hindsight.json`:
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
 | `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle in the `/mem` Settings tab) |
-| `memorizeEngine` | `HINDSIGHT_MEMORIZE_ENGINE` | `inline` | `inline` (off-conversation, default) or `taskflow` (visible in-chat progress) |
-| `recallModelId` | `HINDSIGHT_RECALL_MODEL` | pi default | Cheap model for query-building / filtering |
-| `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | pi default | Model for the inline write pipeline |
+| `recallModelId` | `HINDSIGHT_RECALL_MODEL` | pi default | Small model for recall query-building / filtering |
+| `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | pi default | Small model for the write pipeline (extract / merge / verify / dedup) |
 | `recallOperation` | `HINDSIGHT_RECALL_OPERATION` | `recall` | `recall` (facts) or `reflect` (answer) |
 | `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Recall thoroughness: `light` / `normal` / `thorough` (set in the `/mem` Settings tab) |
 | `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
@@ -294,10 +275,9 @@ A typical **global** `~/.pi/agent/hindsight.json`:
 | `countsRefreshMs` | `HINDSIGHT_COUNTS_REFRESH_MS` | `20000` | Widget counter refresh interval |
 | `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging (full prompts/bodies) — **may leak sensitive data** |
 
-> The `inline` engine (default) runs entirely off-conversation — no agent turn,
-> no context pollution — and includes the bank-aware cross-document dedup step.
-> It uses `retainModelId`. The `taskflow` engine instead uses the models set
-> inside `memory-fill.json` and routes through an agent turn (visible in chat).
+> The write pipeline runs entirely off-conversation via `retainModelId` — no
+> agent turn, no context pollution — and includes the bank-aware cross-document
+> dedup step. `recallModelId` / `retainModelId` can be the same small model.
 
 ---
 
@@ -374,8 +354,8 @@ across sessions.
 | Domain knowledge | `○` | External / business facts, terminology |
 
 Edit them in the `/mem` dashboard's **Settings** tab. State lives in
-`.pi/hindsight.json` under `factCategories` and applies to both the inline and
-taskflow write paths.
+`.pi/hindsight.json` under `factCategories` and steers the write pipeline's
+extraction.
 
 ### Recall effort (`/mem` → Settings)
 

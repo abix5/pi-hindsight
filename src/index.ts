@@ -8,7 +8,7 @@ import { appendDebug, appendLog, setDebugEnabled } from "./log.ts";
 import { Memorizer } from "./memorize.ts";
 import { resolveModel } from "./model.ts";
 import { runRecall } from "./recall.ts";
-import { loadState, saveState, sweepStaleFlowDocs } from "./state.ts";
+import { loadState, saveState } from "./state.ts";
 import { registerTools } from "./tools.ts";
 import { stopReviewServer } from "./review-server.ts";
 import { HindsightStatus } from "./ui.ts";
@@ -36,7 +36,7 @@ function recallTrace(recall: Awaited<ReturnType<typeof runRecall>>): string {
 }
 
 /**
- * True when this pi process is an ephemeral subagent (e.g. a taskflow phase),
+ * True when this pi process is an ephemeral subagent (e.g. a spawned agent phase),
  * which is always spawned with `--no-session`. In that mode we do not want the
  * memory extension at all: it has no UI, no session to memorize, and its hooks
  * and timers only add latency and lifecycle hazards to a throwaway process.
@@ -62,7 +62,7 @@ export default function (pi: ExtensionAPI) {
 	let client: HindsightClient | undefined;
 	const getState = () => (cfg && client ? { cfg, client } : undefined);
 
-	// Taskflow phases (and other subagents) run as throwaway `pi --no-session`
+	// Ephemeral subagents (and other spawned agents) run as throwaway `pi --no-session`
 	// processes. They must NOT get a widget, background timers, session hooks, or
 	// the singleton guard — but they SHOULD get the bank tools, so a memory flow
 	// can recall/retain THROUGH the plugin instead of raw curl (curl is fragile
@@ -107,8 +107,6 @@ export default function (pi: ExtensionAPI) {
 	g.__piHindsightDispose = () => {
 		if (countsTimer) clearInterval(countsTimer);
 		countsTimer = undefined;
-		// Stop any in-flight flow watchers too, so an old Memorizer's polling timers
-		// stop writing to the retired widget after a /reload.
 		memorizer?.dispose();
 		// Close the /mem dashboard HTTP server so a retired instance does not leave a
 		// listening socket behind after a /reload.
@@ -137,7 +135,7 @@ export default function (pi: ExtensionAPI) {
 		cfg = loadConfig(cwd);
 		client = new HindsightClient(cfg);
 		setDebugEnabled(cfg.debug);
-		// A fresh Memorizer owns fresh watcher timers; retire the previous one first.
+		// Retire the previous Memorizer before creating a new one.
 		memorizer?.dispose();
 		memorizer = new Memorizer({ pi, cfg, client, status });
 		// Gate the widget on activation: with no declared bank, keep the row hidden so
@@ -151,17 +149,9 @@ export default function (pi: ExtensionAPI) {
 		if (countsTimer) clearInterval(countsTimer);
 		countsTimer = setInterval(refreshCounts, cfg.countsRefreshMs);
 		// unref: a background timer must NEVER keep the host process alive. Without
-		// this, any pi subprocess that loads this extension (e.g. a taskflow subagent)
+		// this, any pi subprocess that loads this extension (e.g. a spawned subagent)
 		// cannot exit after finishing its turn — it hangs until the idle-timeout kill.
 		countsTimer.unref?.();
-		// Housekeeping: drop orphaned per-run flow docs (_doc-<tag>.txt) left behind
-		// by a crashed/aborted flow so they do not pile up. Older than 24h only.
-		try {
-			const swept = sweepStaleFlowDocs(cwd, cfg.deltaDir, 24 * 60 * 60 * 1000);
-			if (swept) appendDebug(cwd, "flowdoc.sweep", { removed: swept });
-		} catch {
-			/* housekeeping is best-effort */
-		}
 	};
 
 	init(process.cwd());
@@ -175,7 +165,6 @@ export default function (pi: ExtensionAPI) {
 			bankId: cfg?.bankId,
 			autoRecall: cfg?.autoRecall,
 			autoMemorize: cfg?.autoMemorize,
-			memorizeEngine: cfg?.memorizeEngine,
 		});
 		status.attach(ctx.ui);
 		if (!cfg || !client) return;
@@ -341,11 +330,10 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// Last-chance memory write on session teardown, so the un-memorized tail is not
-	// lost when a session is quit or replaced by /new WITHOUT a compaction. This
-	// MUST use the inline engine (forceInline): the taskflow engine needs a future
-	// agent turn, which never comes once we are tearing down. session_shutdown
-	// handlers are awaited before process exit (runner.emit), so the async write
-	// completes first — bounded by a 60s cap so quitting can never hang.
+	// lost when a session is quit or replaced by /new WITHOUT a compaction.
+	// session_shutdown handlers are awaited before process exit (runner.emit), so
+	// the async write completes first — bounded by a 60s cap so quitting can
+	// never hang.
 	pi.on("session_shutdown", async (event, ctx) => {
 		const cwd = ctx.cwd ?? process.cwd();
 		appendDebug(cwd, "event.session_shutdown", {
@@ -381,9 +369,7 @@ export default function (pi: ExtensionAPI) {
 		});
 		try {
 			await Promise.race([
-				memorizer.schedule(ctx, `shutdown:${event.reason}`, {
-					forceInline: true,
-				}),
+				memorizer.schedule(ctx, `shutdown:${event.reason}`),
 				cap,
 			]);
 		} catch (err) {

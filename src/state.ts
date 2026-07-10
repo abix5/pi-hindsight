@@ -4,7 +4,7 @@
  * - watermark: id of the last session entry already memorized. Stored as a
  *   session custom entry (survives reload/branch) via pi.appendEntry.
  * - prior-summary + delta chunks: plain files under the project (cwd), so the
- *   taskflow engine (or the inline engine) can read/write them.
+ *   inline engine can read/write them.
  */
 
 import { createHash } from "node:crypto";
@@ -122,44 +122,6 @@ export function writePriorSummary(
 	const abs = resolve(cwd, rel);
 	fs.mkdirSync(path.dirname(abs), { recursive: true });
 	fs.writeFileSync(abs, text, "utf8");
-}
-
-/**
- * Delete orphaned per-run flow docs (`_doc-<tag>.txt`) older than maxAgeMs.
- *
- * The taskflow write phase deletes its own `_doc-<tag>.txt` after storing, but a
- * crashed or aborted flow leaves its staged report behind. Without a sweep those
- * pile up in the delta dir. This removes orphaned per-run files matching
- * `_doc-*.txt`, `current-*.md`, or `spec-*.md` (never the numbered chunk files)
- * and is best-effort. Returns the count removed.
- */
-export function sweepStaleFlowDocs(
-	cwd: string,
-	rel: string,
-	maxAgeMs: number,
-): number {
-	const dir = resolve(cwd, rel);
-	let files: string[];
-	try {
-		files = fs.readdirSync(dir);
-	} catch {
-		return 0;
-	}
-	const cutoff = Date.now() - maxAgeMs;
-	let removed = 0;
-	for (const f of files) {
-		if (!/^(_doc-.*\.txt|current-.*\.md|spec-.*\.md)$/.test(f)) continue;
-		const p = path.join(dir, f);
-		try {
-			if (fs.statSync(p).mtimeMs < cutoff) {
-				fs.rmSync(p, { force: true });
-				removed += 1;
-			}
-		} catch {
-			/* ignore a single unreadable/again-deleted entry */
-		}
-	}
-	return removed;
 }
 
 /**

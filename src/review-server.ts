@@ -127,7 +127,7 @@ function sendJson(
 /**
  * Build the /api/queue payload: fold the queue, then hydrate each pending doc
  * from its bank (concurrently, 5s each). A 404 means the doc was never stored
- * (e.g. a taskflow build → NONE) or already deleted — auto-drop it by writing a
+ * (e.g. a build that produced nothing) or already deleted — auto-drop it by writing a
  * "done" event and excluding it from the response.
  */
 async function buildQueue(): Promise<unknown[]> {
@@ -295,7 +295,6 @@ function pickResolved(cfg: HindsightConfig): Record<string, unknown> {
 		recallFilter: cfg.recallFilter,
 		autoRecall: cfg.autoRecall,
 		autoMemorize: cfg.autoMemorize,
-		memorizeEngine: cfg.memorizeEngine,
 		recallModelId: cfg.recallModelId,
 		retainModelId: cfg.retainModelId,
 	};
@@ -403,7 +402,6 @@ async function handleStatus(deps: DashboardDeps): Promise<[number, unknown]> {
 				namespace: cfg.namespace,
 				bankId: cfg.bankId,
 				active: cfg.active,
-				memorizeEngine: cfg.memorizeEngine,
 				recallEffort: cfg.recallEffort,
 				memoryLanguage: cfg.memoryLanguage,
 				recallModelId: cfg.recallModelId,
@@ -906,7 +904,6 @@ const FIELDS = [
   { key: "recallEffort", label: "Recall effort", type: "select", opts: ["light", "normal", "thorough"], scope: ["global", "project"] },
   { key: "recallOperation", label: "Recall operation", type: "select", opts: ["recall", "reflect"], scope: ["global", "project"] },
   { key: "recallFilter", label: "Recall filter", type: "select", opts: ["model", "off"], scope: ["global", "project"] },
-  { key: "memorizeEngine", label: "Memorize engine", type: "select", opts: ["inline", "taskflow"], scope: ["global", "project"] },
   { key: "retainMission", label: "Retain mission", type: "textarea", scope: ["global", "project"] },
   { key: "observationsMission", label: "Observations mission", type: "textarea", scope: ["global", "project"] },
 ];
@@ -1184,7 +1181,7 @@ async function loadStatus() {
   kv.className = "kv";
   const rows = [
     ["baseUrl", c.baseUrl], ["namespace", c.namespace], ["bankId", c.bankId],
-    ["active", String(c.active)], ["engine", c.memorizeEngine],
+    ["active", String(c.active)],
     ["effort", c.recallEffort], ["language", c.memoryLanguage],
     ["recall model", c.recallModelId || "(default)"], ["retain model", c.retainModelId || "(default)"],
   ];
