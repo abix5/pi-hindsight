@@ -150,8 +150,16 @@ No taskflow, `jq`, or `curl` is needed — the write path runs entirely in-proce
 
 ## Install
 
-pi auto-discovers `.pi/extensions/*.ts` in a trusted project. To add pi-hindsight
-to a project:
+The package declares `pi.extensions`, so the simplest install is:
+
+```bash
+pi install npm:@abix5/pi-hindsight
+```
+
+That registers the extension for pi automatically — then jump to step 3
+(models) and step 4 (declare a bank).
+
+Prefer to wire it by hand (or develop locally)? Do it manually:
 
 1. **Install the package**:
 

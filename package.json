@@ -1,6 +1,6 @@
 {
   "name": "@abix5/pi-hindsight",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": false,
   "type": "module",
   "description": "pi coding-agent extension: long-term project memory via a local Hindsight instance (recall + memorize)",
@@ -25,13 +25,20 @@
     "access": "public"
   },
   "keywords": [
+    "pi-package",
     "pi",
     "pi-coding-agent",
+    "pi-extension",
     "hindsight",
     "memory",
     "llm",
     "extension"
   ],
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "dependencies": {
     "@earendil-works/pi-agent-core": "^0.80.3",
     "@earendil-works/pi-ai": "^0.80.3",
