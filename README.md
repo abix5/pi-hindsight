@@ -290,6 +290,7 @@ Then each project you want memory in just declares its bank:
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
 | `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle in the `/mem` Settings tab) |
+| — | `HINDSIGHT_AUTO_OFF` | `false` | **Kill switch for spawned processes.** Forces both contours off, overriding every config layer (see below) |
 | `recallModelId` | `HINDSIGHT_RECALL_MODEL` | `openai/gpt-5.6-luna` | Model for recall query-building / per-query judging |
 | `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | `openai/gpt-5.6-luna` | Model for the write pipeline (extract / merge / verify / dedup) |
 | `recallModelChain` | `HINDSIGHT_RECALL_MODEL_CHAIN` | `[]` | Ordered fallbacks tried when the recall model fails (the session model is always the last resort) |
@@ -312,6 +313,37 @@ Then each project you want memory in just declares its bank:
 > agent turn, no context pollution — and includes the bank-aware cross-document
 > dedup step. `recallModelId` / `retainModelId` can be the same model.
 
+### Turning the automatic contours off
+
+The tools (`hindsight_recall` / `hindsight_reflect` / `hindsight_retain`) and the
+background contours are independent: you can keep memory reachable **on demand**
+while nothing happens automatically.
+
+**`--mem-only-tools` — tools and nothing else.** The intended mode for workflow
+subtasks and scripted runs:
+
+```bash
+pi --mem-only-tools -p "..."
+```
+
+The extension registers the three bank tools and **stops**: no widget, no
+commands, no session hooks, no background timers, no pre-turn recall, no write
+on compaction or exit. Config layers are still read, so a declared bank is used
+when there is one. Fully ephemeral subagents (`pi --no-session`) already behave
+this way without the flag.
+
+**Softer switches**, when you want the plugin loaded but quiet:
+
+- `/mem-auto off` — both contours off for this session (`/mem-auto recall` or
+  `retain` toggles just one). Session-scoped; nothing is written to disk.
+- `HINDSIGHT_AUTO_OFF=1` — same thing for a spawned process, but the widget,
+  commands and hooks still load.
+
+  Ordinary config keys follow `env → global file → project file`, so a project
+  that opted into `"autoRecall": true` would otherwise re-enable it inside the
+  child process. This flag is applied **last, on top of every layer**, so a
+  parent can always guarantee silence in the processes it spawns.
+
 ### Model fallback
 
 Every memory model call walks a chain rather than trusting one provider:
@@ -325,7 +357,7 @@ message instead of skipping memory for that turn (the trace says `degraded`).
 
 ## Commands & shortcuts
 
-Five commands, plus one TUI hub for everything else:
+Six commands, plus one TUI hub for everything else:
 
 | Command | What it does |
 | --- | --- |
@@ -334,11 +366,17 @@ Five commands, plus one TUI hub for everything else:
 | `/mem-retain <prompt>` | Have the agent study something and store it to the bank now (works even with auto-memorize off). |
 | `/mem-recall <query>` | Ad-hoc search of the memory bank. |
 | `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing). |
+| `/mem-auto [on\|off\|recall\|retain]` | Toggle the background contours **for this session**. No argument prints the current state; `on` / `off` switch both; a bare `recall` or `retain` toggles just that one, and `recall off` / `retain on` set it explicitly. Nothing is written to disk — use the `/mem` Settings tab to persist. |
 | `alt+h` | Open the same panel straight from the keyboard. |
 
-Everything that used to be its own command — auto toggles, fact categories,
-recall effort, status, log, document review — now lives in the `/mem` panel's
-tabs.
+One CLI flag, for spawning agents that must stay silent:
+
+| Flag | What it does |
+| --- | --- |
+| `--mem-only-tools` | Register the `hindsight_*` tools and nothing else — no widget, commands, hooks, timers, or automatic recall/retain (see below). |
+
+Everything else that used to be its own command — fact categories, recall
+effort, status, log, document review — now lives in the `/mem` panel's tabs.
 
 ### Panel navigation
 

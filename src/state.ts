@@ -66,9 +66,23 @@ export function loadState(entries: SessionEntry[]): HindsightState {
 	return state;
 }
 
-/** Persist state as an appended custom entry. */
-export function saveState(pi: ExtensionAPI, state: HindsightState): void {
-	pi.appendEntry<HindsightState>(STATE_CUSTOM_TYPE, state);
+/**
+ * Persist state as an appended custom entry.
+ *
+ * Returns false when the session is already gone: a memorize job can finish
+ * after its session was replaced (`/new`) or reloaded, and `appendEntry` throws
+ * "extension ctx is stale" in that case. The bank write has already succeeded by
+ * then, so losing the watermark entry must not turn into a failed memorize — the
+ * only cost is that the same delta may be re-collected once (the deterministic
+ * document_id makes that an upsert, not a duplicate).
+ */
+export function saveState(pi: ExtensionAPI, state: HindsightState): boolean {
+	try {
+		pi.appendEntry<HindsightState>(STATE_CUSTOM_TYPE, state);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function resolve(cwd: string, rel: string): string {

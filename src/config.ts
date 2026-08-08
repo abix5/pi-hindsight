@@ -278,6 +278,14 @@ export function loadConfig(cwd: string): HindsightConfig {
 	// a scalar or malformed value must not crash the model resolver.
 	merged.recallModelChain = asStringList(merged.recallModelChain);
 	merged.retainModelChain = asStringList(merged.retainModelChain);
+	// Kill switch for spawned processes (workflow subtasks, subagents, CI). Config
+	// files normally win over env, but a project that opted INTO auto-recall must
+	// not be able to re-enable it inside a child process that was launched with
+	// this flag - so it is applied LAST, on top of every layer.
+	if (envBool("HINDSIGHT_AUTO_OFF", false)) {
+		merged.autoRecall = false;
+		merged.autoMemorize = false;
+	}
 	return finalizeActivation(merged, base, global, project, cwd);
 }
 

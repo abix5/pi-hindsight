@@ -221,6 +221,69 @@ export function registerCommands(
 		},
 	});
 
+	// --- auto switches ------------------------------------------------------
+	// Session-scoped kill switch for the two background contours. Nothing is
+	// written to disk: this only flips `runtime`, so the next session starts from
+	// the configured values again (persist via /mem Settings instead).
+	pi.registerCommand("mem-auto", {
+		description:
+			"Memory: toggle auto recall/retain for this session (usage: /mem-auto [on|off|recall|retain])",
+		handler: async (args, ctx) => {
+			const cwd = ctx.cwd ?? process.cwd();
+			appendDebug(cwd, "command.mem-auto", { args });
+			status.attach(ctx.ui);
+			const s = getState();
+			if (!s) return ctx.ui.notify(`${TAG} not initialized`, "error");
+			if (!s.cfg.active) return ctx.ui.notify(INACTIVE, "info");
+
+			const arg = args.trim().toLowerCase();
+			const apply = (recall: boolean, memorize: boolean): void => {
+				runtime.autoRecall = recall;
+				runtime.autoMemorize = memorize;
+				recall ? status.recallOn() : status.recallOff();
+				memorize ? status.memoOn() : status.memoOff();
+				ctx.ui.notify(
+					`${TAG} auto recall ${recall ? "on" : "off"} · auto retain ${memorize ? "on" : "off"} (this session)`,
+					"info",
+				);
+			};
+
+			switch (arg) {
+				case "":
+				case "status":
+					return ctx.ui.notify(
+						`${TAG} auto recall ${runtime.autoRecall ? "on" : "off"} · auto retain ${runtime.autoMemorize ? "on" : "off"} — usage: /mem-auto [on|off|recall|retain]`,
+						"info",
+					);
+				case "on":
+					return apply(true, true);
+				case "off":
+					return apply(false, false);
+				// A bare contour name toggles THAT contour and leaves the other alone.
+				case "recall":
+					return apply(!runtime.autoRecall, runtime.autoMemorize);
+				case "retain":
+				case "memorize":
+					return apply(runtime.autoRecall, !runtime.autoMemorize);
+				case "recall on":
+					return apply(true, runtime.autoMemorize);
+				case "recall off":
+					return apply(false, runtime.autoMemorize);
+				case "retain on":
+				case "memorize on":
+					return apply(runtime.autoRecall, true);
+				case "retain off":
+				case "memorize off":
+					return apply(runtime.autoRecall, false);
+				default:
+					return ctx.ui.notify(
+						"Usage: /mem-auto [on|off|recall|retain|recall off|retain off]",
+						"error",
+					);
+			}
+		},
+	});
+
 	// --- history (fast in-terminal view) ------------------------------------
 	// alt+h jumps straight to the panel's Log tab equivalent without leaving the
 	// keyboard; the same content also lives in /mem.

@@ -204,6 +204,7 @@ export class Memorizer {
 					opts?.fromStart ?? false,
 					snapshot,
 					opts?.boundaryId,
+					sessionId,
 				),
 			)
 			.catch((err) => {
@@ -218,8 +219,21 @@ export class Memorizer {
 		return next;
 	}
 
+	/**
+	 * Notify through the UI, tolerating a torn-down or REPLACED session.
+	 *
+	 * A memorize job outlives the ctx that scheduled it (it is queued, and the
+	 * shutdown write runs while the session is being replaced). Touching a stale
+	 * ctx throws "This extension ctx is stale after session replacement or
+	 * reload", which would abort an otherwise healthy write, so every access is
+	 * guarded.
+	 */
 	private notify(ctx: ExtensionContext, msg: string): void {
-		ctx.ui?.notify?.(`\uD83E\uDDE0 ${msg}`, "info");
+		try {
+			ctx.ui?.notify?.(`\uD83E\uDDE0 ${msg}`, "info");
+		} catch {
+			/* stale ctx after /new or reload — the write itself still matters */
+		}
 	}
 
 	private async run(
@@ -228,6 +242,7 @@ export class Memorizer {
 		fromStart = false,
 		snapshot?: Entries,
 		boundaryId?: string,
+		scheduledSessionId?: string,
 	): Promise<void> {
 		const { pi, cfg } = this.deps;
 		const cwd = ctx.cwd ?? process.cwd();
@@ -285,7 +300,10 @@ export class Memorizer {
 		// Deterministic document id for THIS window (session + first/last delta entry
 		// id). Re-ingesting the same window upserts the existing Hindsight document
 		// (bank deletes it and its facts, then re-extracts) instead of duplicating.
-		const sessionId = ctx.sessionManager.getSessionId() ?? "default";
+		// Use the id captured at schedule time: by now the session may have been
+		// replaced (/new, reload), and re-reading it off the old ctx throws.
+		const sessionId =
+			scheduledSessionId ?? ctx.sessionManager.getSessionId() ?? "default";
 		const firstId = delta[0]?.id ?? "";
 		const docId = computeDocId(sessionId, firstId, windowLastId ?? "");
 		appendDebug(cwd, "memorize.docid", {
@@ -341,7 +359,7 @@ export class Memorizer {
 			});
 			await this.runInline(ctx, chain, chunks, deltaText, docId);
 			if (lastId) {
-				saveState(pi, {
+				const saved = saveState(pi, {
 					watermark: lastId,
 					savedRanges: pruneConsumedRanges(entries, state.savedRanges, lastId),
 				});
@@ -356,6 +374,8 @@ export class Memorizer {
 				});
 				// Also enqueue the stored document into the GLOBAL review queue.
 				enqueueReview(cwd, cfg, docId, reason);
+				if (!saved)
+					appendDebug(cwd, "memorize.watermark.stale", { reason, lastId });
 			}
 			appendDebug(cwd, "memorize.watermark.saved", { reason, lastId });
 		} catch (err) {

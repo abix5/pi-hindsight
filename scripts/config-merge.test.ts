@@ -120,6 +120,26 @@ function slugOf(cwd: string): string {
 	check("(e) inactive still has folder-slug bank", cfg.bankId === slugOf(cwd));
 }
 
+// (f) HINDSIGHT_AUTO_OFF overrides every layer -----------------------------
+{
+	writeGlobal({ bankId: "auto", autoRecall: true, autoMemorize: true });
+	const cwd = makeCwd("f", {
+		bankId: "proj",
+		autoRecall: true,
+		autoMemorize: true,
+	});
+	cleanup.push(cwd);
+	const on = loadConfig(cwd);
+	check("(f) without the flag, config layers win", on.autoRecall === true);
+
+	process.env.HINDSIGHT_AUTO_OFF = "1";
+	const off = loadConfig(cwd);
+	delete process.env.HINDSIGHT_AUTO_OFF;
+	check("(f) auto-off beats project autoRecall", off.autoRecall === false);
+	check("(f) auto-off beats project autoMemorize", off.autoMemorize === false);
+	check("(f) auto-off leaves the bank active", off.active === true);
+}
+
 for (const dir of cleanup) fs.rmSync(dir, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

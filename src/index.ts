@@ -60,6 +60,18 @@ function isInstalledCopy(): boolean {
 }
 
 /**
+ * True when this run asked for TOOLS-ONLY mode (`--mem-only-tools`).
+ *
+ * Read straight off argv rather than through `pi.getFlag`: flag VALUES are
+ * applied by the runner AFTER every extension factory has run, so at load time
+ * `getFlag` still returns undefined — and the whole point of this flag is to
+ * decide, at load time, whether to install hooks and the widget at all.
+ */
+function onlyToolsRequested(): boolean {
+	return process.argv.includes("--mem-only-tools");
+}
+
+/**
  * True when the current project is a DEV checkout of this plugin that loads its
  * own working-tree source via a local `.pi/extensions/hindsight.ts` loader.
  * Used so the globally-installed copy stands down here and the dev source wins,
@@ -94,13 +106,23 @@ export default function (pi: ExtensionAPI) {
 	let client: HindsightClient | undefined;
 	const getState = () => (cfg && client ? { cfg, client } : undefined);
 
-	// Ephemeral subagents (and other spawned agents) run as throwaway `pi --no-session`
-	// processes. They must NOT get a widget, background timers, session hooks, or
-	// the singleton guard — but they SHOULD get the bank tools, so a memory flow
-	// can recall/retain THROUGH the plugin instead of raw curl (curl is fragile
-	// with weak models and gets tripped by other MCP guardrails). Register the
-	// stateless tools only, then stop.
-	if (isEphemeralSubagent()) {
+	// `--mem-only-tools` (and the ephemeral-subagent case below) select TOOLS-ONLY
+	// mode. Registered first so the flag exists before anything reads it.
+	pi.registerFlag("mem-only-tools", {
+		description:
+			"Memory: register the hindsight_* tools only — no widget, hooks, commands, timers, or automatic recall/retain",
+		type: "boolean",
+	});
+
+	// Tools-only mode. Two ways in:
+	//   * `--mem-only-tools` — explicit, for workflow subtasks and scripted runs.
+	//   * an ephemeral subagent (`pi --no-session`) — a throwaway process with no
+	//     UI and no session to memorize.
+	// Either way the process gets the bank tools and NOTHING else: no widget, no
+	// background timers, no session hooks, no commands, no singleton guard. The
+	// tools still read the normal config layers, so a declared bank is used when
+	// there is one (and they report "not initialized" when there is not).
+	if (onlyToolsRequested() || isEphemeralSubagent()) {
 		try {
 			cfg = loadConfig(process.cwd());
 			client = new HindsightClient(cfg);
@@ -192,8 +214,8 @@ export default function (pi: ExtensionAPI) {
 		else status.clear();
 		runtime.autoRecall = cfg.autoRecall;
 		runtime.autoMemorize = cfg.autoMemorize;
-		cfg.autoRecall ? status.recallOn() : status.recallOff();
-		if (!cfg.autoMemorize) status.memoOff();
+		runtime.autoRecall ? status.recallOn() : status.recallOff();
+		if (!runtime.autoMemorize) status.memoOff();
 		if (countsTimer) clearInterval(countsTimer);
 		countsTimer = setInterval(refreshCounts, cfg.countsRefreshMs);
 		// unref: a background timer must NEVER keep the host process alive. Without
