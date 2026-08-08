@@ -33,18 +33,41 @@ Auto-mode markers: `↙` = recall, `↗` = retain, `auto off` = both disabled.
 
 ### Recall (read path — inline)
 
-Runs on the `before_agent_start` hook. A cheap model turns the recent
-conversation into a bank query and decides whether a lookup is even worth it
-(meta-questions and chit-chat are skipped). Matching facts are fetched, de-duped
-against facts already injected this session, and returned as an *untrusted
-reference* block for the current turn. Nothing is rewritten or invented — facts
-are injected verbatim and the main model weaves them in.
+Runs on the `before_agent_start` hook and works in three stages, all on a cheap
+model.
+
+**1. Build the fewest queries that cover the request.** The message plus the
+recent conversation (user/assistant prose, agent thinking, and tool *calls* —
+never tool output) is turned into **1–5 standalone bank queries**. Fewer is
+better: one well-aimed query is the preferred answer, and a second is added only
+when the request spans genuinely separate subjects. Queries are search keys made
+of concrete subjects (paths, identifiers, config keys), never a reworded copy of
+the message. A message that yields no searchable subject even in context (a bare
+"continue" / "ok") skips the lookup entirely.
+
+**2. One independent recall per query, in parallel.** Every query gets its own
+bank call *and* its own verdict: the model scores that query's hits 0–100 and
+keeps only the facts that genuinely answer it. Judging per query — rather than
+once over a merged pool — is what stops a vague query's noise from crowding out
+a precise query's facts, and lets a query that returned only junk be dropped
+whole (score below 25).
+
+**3. Merge into the final block.** Surviving facts are merged best-scoring query
+first, de-duped against facts already injected this session, and capped at
+`recallMaxLines`, so an exhausted line budget costs the *weakest* query its tail.
+The result is an *untrusted reference* block for the current turn. Nothing is
+rewritten or invented — facts are injected verbatim and the main model weaves
+them in. When the bank answers but every fact is judged irrelevant, **nothing**
+is injected.
 
 Two operations are supported:
 
 - `recall` (default) — return the raw relevant facts.
 - `reflect` — ask Hindsight to compose a direct answer from the bank, used only
   for self-contained factual questions.
+
+If every model in the chain is down, recall degrades to keyword queries and
+injects unjudged hits rather than losing memory entirely.
 
 ### Memorize (write path)
 
@@ -95,21 +118,20 @@ the bank already matches.
 Documents are stored to the bank **immediately** (so dedup and recall always
 work against fresh knowledge), and every stored document is also placed in a
 **global review queue** (`~/.pi/hindsight/review-queue.jsonl`, shared across
-all projects). `/mem` opens a small local web UI (127.0.0.1, ephemeral port,
-in your browser); the **Review** tab has a project navigation sidebar with a
-pending-count per project, and each document expands to show its full text,
-creation date, fact count and trigger — so you can:
+all projects). `/mem` opens a TUI panel right in the terminal; the **Review**
+tab walks the pending documents (newest first) showing each one's full text,
+fact count, project and trigger — so you can:
 
-- **Approve** — you are done with it; removes it from the queue (the bank is
-  untouched).
-- **Edit** — fix the text in place; the document is re-stored under the *same*
-  `document_id`, so the bank replaces the old facts with the corrected ones.
-- **Delete** — remove the document and its facts from the bank entirely.
+- **Approve** (`a`) — you are done with it; removes it from the queue (the bank
+  is untouched).
+- **Edit** (`e`) — fix the text in place; the document is re-stored under the
+  *same* `document_id`, so the bank replaces the old facts with the corrected
+  ones.
+- **Delete** (`d`) — remove the document and its facts from the bank entirely.
 
 Queue entries whose document never made it to the bank (a run that produced
 nothing durable) are dropped automatically. The queue is an append-only event
-log, so parallel pi sessions can write to it safely; `/mem stop` shuts the
-server down (it also closes on session end).
+log, so parallel pi sessions can write to it safely.
 
 ### Pointers & `/mem-retain`
 
@@ -197,7 +219,7 @@ Prefer to wire it by hand (or develop locally)? Do it manually:
    project bank the plugin stays **dormant** — no recall, no widget — so the
    loader is safe to keep globally and only wakes up in projects you opt in.
 
-5. Open the dashboard with `/mem` → the **Status** tab confirms the bank
+5. Open the panel with `/mem` → the **Status** tab confirms the bank
    connection; the **Settings** tab is where you configure everything visually.
 
 ---
@@ -210,8 +232,9 @@ Config is merged from three layers, later wins:
 Put shared settings (baseUrl, namespace, models, language, missions, effort,
 categories, auto-flags) in the **global** file once, and keep only the
 per-project **bank** (and any project-specific overrides) in the project file.
-The easiest way to edit both is the `/mem` dashboard's **Settings** tab, which
-shows the two layers side by side and writes to the file you choose.
+The easiest way to edit both is the `/mem` panel's **Settings** tab, which
+writes the bank id to the project file and every other preference to the global
+one.
 
 ### Activation is gated on a bank
 
@@ -267,15 +290,17 @@ Then each project you want memory in just declares its bank:
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
 | `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle in the `/mem` Settings tab) |
-| `recallModelId` | `HINDSIGHT_RECALL_MODEL` | pi default | Small model for recall query-building / filtering |
-| `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | pi default | Small model for the write pipeline (extract / merge / verify / dedup) |
+| `recallModelId` | `HINDSIGHT_RECALL_MODEL` | `openai/gpt-5.6-luna` | Model for recall query-building / per-query judging |
+| `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | `openai/gpt-5.6-luna` | Model for the write pipeline (extract / merge / verify / dedup) |
+| `recallModelChain` | `HINDSIGHT_RECALL_MODEL_CHAIN` | `[]` | Ordered fallbacks tried when the recall model fails (the session model is always the last resort) |
+| `retainModelChain` | `HINDSIGHT_RETAIN_MODEL_CHAIN` | `[]` | Ordered fallbacks tried when the retain model fails (the session model is always the last resort) |
 | `recallOperation` | `HINDSIGHT_RECALL_OPERATION` | `recall` | `recall` (facts) or `reflect` (answer) |
-| `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Recall thoroughness: `light` / `normal` / `thorough` (set in the `/mem` Settings tab) |
+| `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Query ceiling per recall: `light` (2) / `normal` (3) / `thorough` (5) (set in the `/mem` Settings tab) |
 | `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
 | `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set in the `/mem` Settings tab) |
-| `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (LLM-picked) or `off` |
+| `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (per-query LLM judge scores hits and drops junk) or `off` |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
-| `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent context budget for the query |
+| `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent-context budget for query building (tool output excluded) |
 | `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim) |
 | `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
 | `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
@@ -285,26 +310,53 @@ Then each project you want memory in just declares its bank:
 
 > The write pipeline runs entirely off-conversation via `retainModelId` — no
 > agent turn, no context pollution — and includes the bank-aware cross-document
-> dedup step. `recallModelId` / `retainModelId` can be the same small model.
+> dedup step. `recallModelId` / `retainModelId` can be the same model.
+
+### Model fallback
+
+Every memory model call walks a chain rather than trusting one provider:
+`<role>ModelId` → each id in `<role>ModelChain` → **the session's own model**.
+A candidate that errors (auth failure, timeout, 5xx) is logged and the next one
+answers; only Esc/abort stops the walk. If *every* model is unreachable, recall
+still queries the bank — it degrades to keyword queries distilled from your
+message instead of skipping memory for that turn (the trace says `degraded`).
 
 ---
 
 ## Commands & shortcuts
 
-Five commands, plus one browser hub for everything else:
+Five commands, plus one TUI hub for everything else:
 
 | Command | What it does |
 | --- | --- |
-| `/mem [stop]` | Open the **dashboard** in the browser: Review · Settings · Log · Status. This is the single place for configuration, document review, history, and health. Works even when the project is dormant (set a bank in Settings to activate). `/mem stop` closes the server. |
+| `/mem` | Open the **panel** in the terminal: Status · Settings · Review · Log. This is the single place for configuration, document review, history, and health. Works even when the project is dormant (set a bank in Settings to activate). |
 | `/mem-save [all]` | Save the accumulated context now. `/mem-save all` re-collects the **whole** session (deletes this session's previously stored documents first, then re-ingests). |
 | `/mem-retain <prompt>` | Have the agent study something and store it to the bank now (works even with auto-memorize off). |
 | `/mem-recall <query>` | Ad-hoc search of the memory bank. |
 | `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing). |
-| `alt+h` | Quick in-terminal memory operation history. |
+| `alt+h` | Open the same panel straight from the keyboard. |
 
 Everything that used to be its own command — auto toggles, fact categories,
-recall effort, status, log, document review — now lives in the `/mem`
-dashboard's tabs.
+recall effort, status, log, document review — now lives in the `/mem` panel's
+tabs.
+
+### Panel navigation
+
+The panel has two focus levels, so a list inside a tab can never swallow the
+tab keys:
+
+| Key | Where | What it does |
+| --- | --- | --- |
+| `←` / `→` / `Tab` / `Shift+Tab` | anywhere | Switch tab — works even from inside a list |
+| `Enter` / `↓` | tab strip | Descend into the active tab's content |
+| `Esc` | content | Back to the tab strip |
+| `Esc` / `q` | tab strip | Close the panel |
+| `r` | anywhere | Reload what the active tab shows |
+| `↑` / `↓` | content | Move the cursor (settings row, document, log entry) |
+| `Enter` / `Space` | Settings | Change the selected setting |
+| `a` / `e` / `d` | Review | Approve / edit / delete the shown document |
+| `PgUp` / `PgDn` | Review | Scroll a long document |
+| `Enter` | Log | Expand the selected entry |
 
 ### Agent tools
 
@@ -361,7 +413,7 @@ across sessions.
 | Code map | `○` | Which file/symbol holds what, module responsibilities |
 | Domain knowledge | `○` | External / business facts, terminology |
 
-Edit them in the `/mem` dashboard's **Settings** tab. State lives in
+Edit them in the `/mem` panel's **Settings** tab. State lives in
 `.pi/hindsight.json` under `factCategories` and steers the write pipeline's
 extraction.
 

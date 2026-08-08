@@ -123,6 +123,9 @@ export class HindsightStatus {
 	recallStart(): void {
 		this.recall.off = false;
 		this.recall.active = true;
+		// Line 2 is explicit that the wait is uninterruptible: Esc cannot cancel the
+		// preflight bank call, so it only clears once the bank actually answers.
+		this.lastAction = this.c("dim", "↙ waiting for bank… (clears on reply)");
 		this.render();
 	}
 	recallDone(count: number): void {
@@ -168,7 +171,7 @@ export class HindsightStatus {
 			return `${head} ${dim(info.injected > 0 ? "· answered" : "· no answer")}`;
 		if (info.found === 0) return `${head} ${dim("· nothing found")}`;
 		// found → injected (some may be dropped as already-seen this session).
-		return `${head} ${dim(`· ${info.found}→${info.injected}`)}`;
+		return `${head} ${dim(`· found ${info.found} → ${info.injected}`)}`;
 	}
 
 	// --- memorize (write) ---------------------------------------------------
@@ -253,7 +256,7 @@ export class HindsightStatus {
 
 	/** The label shown while memory is actively working, or undefined when idle. */
 	private busyLabel(): string | undefined {
-		if (this.recall.active) return "recalling…";
+		if (this.recall.active) return "waiting for bank…";
 		if (
 			this.memo.phase === "collecting" ||
 			this.memo.phase === "extracting" ||

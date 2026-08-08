@@ -2,16 +2,12 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { openHistory } from "./history-ui.ts";
-import {
-	isReviewServerRunning,
-	startDashboard,
-	stopReviewServer,
-} from "./review-server.ts";
+import { openMemPanel } from "./mem-panel.ts";
 import { appendDebug } from "./log.ts";
 import { type HindsightConfig, loadConfig } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import type { Memorizer } from "./memorize.ts";
+import { resolveChain } from "./model.ts";
 import { readDispatchDocIds, saveState } from "./state.ts";
 import type { HindsightStatus } from "./ui.ts";
 
@@ -20,7 +16,7 @@ const TAG = "\uD83E\uDDE0";
 
 /**
  * Shown when a memory command runs in a project with no declared bank. The whole
- * plugin is gated on `cfg.active`; the ONE way to activate is the /mem dashboard's
+ * plugin is gated on `cfg.active`; the ONE way to activate is the /mem panel's
  * Settings tab, so every command except /mem points the user there.
  */
 const INACTIVE = `${TAG} no memory bank configured for this project — run /mem and set a bank id in Settings to activate`;
@@ -48,43 +44,35 @@ export function registerCommands(
 	runtime: Runtime,
 ): void {
 	// --- dashboard hub ------------------------------------------------------
-	// The single entry to Review / Settings / Log / Status. This is the ONLY
+	// The single entry to Status / Settings / Review / Log. This is the ONLY
 	// command that must work while the plugin is inactive: its Settings tab is
 	// exactly where the user declares a bank id to activate the plugin, so it
 	// deliberately never checks `cfg.active`.
 	pi.registerCommand("mem", {
 		description:
-			"Memory: open the dashboard (review \u00b7 settings \u00b7 log \u00b7 status)",
+			"Memory: open the dashboard (status \u00b7 settings \u00b7 review \u00b7 log)",
 		handler: async (args, ctx) => {
 			const cwd = ctx.cwd ?? process.cwd();
 			appendDebug(cwd, "command.mem", { args });
 			status.attach(ctx.ui);
-			// `/mem stop` tears the server down; a bare call starts it (or re-opens
-			// the existing one) and always notifies the URL.
-			if (args.trim().toLowerCase() === "stop") {
-				if (isReviewServerRunning()) {
-					stopReviewServer();
-					ctx.ui.notify(`${TAG} dashboard stopped`, "info");
-				} else {
-					ctx.ui.notify(`${TAG} dashboard is not running`, "info");
-				}
-				return;
-			}
+			const s = getState();
+			if (!s) return ctx.ui.notify(`${TAG} not initialized`, "error");
 			try {
-				const s = getState();
-				if (!s) return ctx.ui.notify(`${TAG} not initialized`, "error");
-				const url = await startDashboard({
+				await openMemPanel(ctx, {
 					cwd,
 					loadCfg: () => loadConfig(cwd),
 					client: s.client,
+					modelChains: () => ({
+						recall: resolveChain(ctx, s.cfg, "recall")?.label ?? "(none)",
+						retain: resolveChain(ctx, s.cfg, "retain")?.label ?? "(none)",
+					}),
 				});
-				ctx.ui.notify(`${TAG} dashboard open: ${url}`, "info");
 			} catch (err) {
 				appendDebug(cwd, "command.mem.error", {
 					error: (err as Error).message,
 				});
 				ctx.ui.notify(
-					`${TAG} could not start dashboard: ${(err as Error).message}`,
+					`${TAG} could not open the panel: ${(err as Error).message}`,
 					"error",
 				);
 			}
@@ -234,8 +222,8 @@ export function registerCommands(
 	});
 
 	// --- history (fast in-terminal view) ------------------------------------
-	// The dashboard's Log tab is the primary history view; alt+h keeps a quick TUI
-	// history at hand without leaving the terminal.
+	// alt+h jumps straight to the panel's Log tab equivalent without leaving the
+	// keyboard; the same content also lives in /mem.
 	pi.registerShortcut("alt+h", {
 		description: "Open memory history",
 		handler: async (ctx) => openLog(ctx, getState()),
@@ -247,13 +235,15 @@ async function openLog(ctx: ExtensionContext, s: State): Promise<void> {
 		initialized: !!s,
 	});
 	if (!s) return ctx.ui.notify(`${TAG} not initialized`, "error");
-	try {
-		await openHistory(ctx, s.cfg.logPath);
-		appendDebug(ctx.cwd ?? process.cwd(), "command.mem-log.done");
-	} catch (err) {
-		appendDebug(ctx.cwd ?? process.cwd(), "command.mem-log.error", {
-			error: (err as Error).message,
-		});
-		throw err;
-	}
+	const cwd = ctx.cwd ?? process.cwd();
+	await openMemPanel(ctx, {
+		cwd,
+		loadCfg: () => loadConfig(cwd),
+		client: s.client,
+		modelChains: () => ({
+			recall: resolveChain(ctx, s.cfg, "recall")?.label ?? "(none)",
+			retain: resolveChain(ctx, s.cfg, "retain")?.label ?? "(none)",
+		}),
+	});
+	appendDebug(cwd, "command.mem-log.done");
 }

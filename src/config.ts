@@ -29,6 +29,10 @@ export interface HindsightConfig {
 	recallModelId?: string;
 	/** Stronger model for retain/summarize/write pipeline. */
 	retainModelId?: string;
+	/** Ordered recall fallbacks tried when `recallModelId` fails (session model is always last). */
+	recallModelChain: string[];
+	/** Ordered retain fallbacks tried when `retainModelId` fails (session model is always last). */
+	retainModelChain: string[];
 	/** Token budget for a single rolling summary. */
 	summaryMaxTokens: number;
 	/** Token budget for recall responses. */
@@ -39,9 +43,9 @@ export interface HindsightConfig {
 	recallContextTokens: number;
 	/** Recall operation: raw facts or Hindsight-generated reflection. */
 	recallOperation: "recall" | "reflect";
-	/** How thorough recall is: controls how many bank queries / refine rounds we spend. */
+	/** Ceiling on how many separate bank queries one recall may build (2/3/5). */
 	recallEffort: RecallEffort;
-	/** Hard ceiling on total bank queries per recall (safety bound across all rounds). */
+	/** Hard safety bound on bank queries per recall, applied on top of the effort. */
 	recallMaxQueries: number;
 	/**
 	 * Fact-category configurator for the memorize contour. Loose shape:
@@ -93,6 +97,19 @@ function envInt(name: string, def: number): number {
 	return Number.isFinite(n) ? n : def;
 }
 
+/** Comma-separated env list → string[] (empty when unset). */
+function envList(name: string): string[] {
+	return envListFrom(process.env[name] ?? "");
+}
+
+/** Split one comma-separated value into trimmed, non-empty entries. */
+function envListFrom(raw: string): string[] {
+	return raw
+		.split(",")
+		.map((s) => s.trim())
+		.filter(Boolean);
+}
+
 function envFloat(name: string, def: number): number {
 	const v = process.env[name];
 	if (v === undefined) return def;
@@ -134,6 +151,8 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"modelId",
 	"recallModelId",
 	"retainModelId",
+	"recallModelChain",
+	"retainModelChain",
 	"summaryMaxTokens",
 	"recallMaxTokens",
 	"recallMaxLines",
@@ -215,8 +234,10 @@ export function loadConfig(cwd: string): HindsightConfig {
 		namespace: process.env.HINDSIGHT_NAMESPACE ?? "default",
 		bankId: process.env.HINDSIGHT_BANK ?? defaultBankId(cwd),
 		modelId: process.env.HINDSIGHT_MODEL || undefined,
-		recallModelId: process.env.HINDSIGHT_RECALL_MODEL || undefined,
-		retainModelId: process.env.HINDSIGHT_RETAIN_MODEL || undefined,
+		recallModelId: process.env.HINDSIGHT_RECALL_MODEL || "openai/gpt-5.6-luna",
+		retainModelId: process.env.HINDSIGHT_RETAIN_MODEL || "openai/gpt-5.6-luna",
+		recallModelChain: envList("HINDSIGHT_RECALL_MODEL_CHAIN"),
+		retainModelChain: envList("HINDSIGHT_RETAIN_MODEL_CHAIN"),
 		summaryMaxTokens: envInt("HINDSIGHT_SUMMARY_MAX_TOKENS", 6000),
 		recallMaxTokens: envInt("HINDSIGHT_RECALL_MAX_TOKENS", 2048),
 		recallMaxLines: envInt("HINDSIGHT_RECALL_MAX_LINES", 8),
@@ -252,13 +273,19 @@ export function loadConfig(cwd: string): HindsightConfig {
 	};
 	const global = readGlobalOverrides();
 	const project = readProjectOverrides(cwd);
-	return finalizeActivation(
-		{ ...base, ...global, ...project },
-		base,
-		global,
-		project,
-		cwd,
-	);
+	const merged = { ...base, ...global, ...project };
+	// Chains come from user-edited JSON, so coerce them back to string arrays:
+	// a scalar or malformed value must not crash the model resolver.
+	merged.recallModelChain = asStringList(merged.recallModelChain);
+	merged.retainModelChain = asStringList(merged.retainModelChain);
+	return finalizeActivation(merged, base, global, project, cwd);
+}
+
+/** Coerce an override value into a clean string list (tolerates a bare string). */
+function asStringList(v: unknown): string[] {
+	if (typeof v === "string") return envListFrom(v);
+	if (!Array.isArray(v)) return [];
+	return v.map((x) => (typeof x === "string" ? x.trim() : "")).filter(Boolean);
 }
 
 /**

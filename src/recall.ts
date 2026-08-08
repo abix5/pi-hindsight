@@ -4,25 +4,31 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { HindsightConfig, RecallEffort } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug } from "./log.ts";
-import { type ResolvedModel, runModel } from "./model.ts";
-import { QUERY_BUILDER, QUERY_REFINE, RECALL_PICK } from "./prompts.ts";
+import { type ModelChain, runModel } from "./model.ts";
+import { QUERY_BUILDER, RECALL_JUDGE } from "./prompts.ts";
 import {
 	directAnswer,
 	extractHits,
+	heuristicQueries,
 	normalizeLine,
+	parseJudge,
 	parseQueryPlan,
-	parseIndexList,
-	parseRefine,
+	type QueryPlan,
 	recentContext,
 	seenInjectedFacts,
 	type RecallHit,
 } from "./recall-utils.ts";
 
-/** Map the recall-effort setting to a query/round budget. */
-function effortPlan(effort: RecallEffort): { queries: number; rounds: number } {
-	if (effort === "light") return { queries: 1, rounds: 1 };
-	if (effort === "thorough") return { queries: 4, rounds: 3 };
-	return { queries: 3, rounds: 1 };
+/** Facts shown to the judge for ONE query (the bank can return dozens). */
+const JUDGE_CANDIDATES = 24;
+/** A query scoring below this contributed nothing usable and is dropped whole. */
+const MIN_USEFUL_SCORE = 25;
+
+/** Map the recall-effort setting to a query budget (hard ceiling: 5 queries). */
+function effortPlan(effort: RecallEffort): { queries: number } {
+	if (effort === "light") return { queries: 2 };
+	if (effort === "thorough") return { queries: 5 };
+	return { queries: 3 };
 }
 
 /** One bank recall call → raw hits. */
@@ -87,53 +93,112 @@ export function formatRecallHits(res: unknown): string {
 	return lines.join("\n");
 }
 
-async function modelPick(
+/** One query's independent recall: bank hits + the model's verdict on them. */
+interface QueryOutcome {
+	query: string;
+	found: number;
+	score: number;
+	hits: RecallHit[];
+}
+
+/**
+ * Run ONE query end to end: hit the bank, then have the model judge THAT query's
+ * results on their own.
+ *
+ * Judging per query (rather than once over the merged pool) is what keeps a
+ * precise query's facts from being diluted by a vague query's noise, and lets a
+ * query that returned only junk be discarded wholesale via score 0.
+ */
+async function runOneQuery(
 	ctx: ExtensionContext,
-	resolved: ResolvedModel,
+	cfg: HindsightConfig,
+	client: HindsightClient,
+	chain: ModelChain,
 	prompt: string,
-	hits: RecallHit[],
+	query: string,
+	judge: boolean,
 	signal?: AbortSignal,
-): Promise<RecallHit[]> {
-	const numbered = hits.map((h, i) => `${i + 1}. ${h.text}`).join("\n");
-	const raw = await runModel(
-		ctx,
-		resolved,
-		RECALL_PICK,
-		`TASK:\n${prompt}\n\nFACTS:\n${numbered}`,
-		{ maxTokens: 128, signal },
-	);
-	// Distinguish a legitimate empty selection ("[]" = nothing relevant, honored)
-	// from a formatting failure (cheap model emitted prose). On a failure, do NOT
-	// silently drop every fact - keep all candidates (already capped upstream).
-	let parsed: unknown;
+): Promise<QueryOutcome> {
+	const cwd = ctx.cwd ?? process.cwd();
+	let hits: RecallHit[];
 	try {
-		parsed = JSON.parse(raw.trim());
-	} catch {
-		parsed = undefined;
-	}
-	if (!Array.isArray(parsed)) {
-		appendDebug(ctx.cwd ?? process.cwd(), "recall.pick.invalid", {
-			model: resolved.label,
-			hits: hits.length,
-			output: raw,
+		hits = await bankHits(client, query, cfg, signal);
+	} catch (err) {
+		appendDebug(cwd, "recall.bank.error", {
+			query,
+			error: (err as Error).message,
 		});
-		return hits;
+		return { query, found: 0, score: 0, hits: [] };
 	}
-	const picked = parseIndexList(raw, hits.length);
-	appendDebug(ctx.cwd ?? process.cwd(), "recall.pick.raw", {
-		model: resolved.label,
-		hits: hits.length,
+	const found = hits.length;
+	// Bound what the judge sees: the bank can return dozens of near-duplicates.
+	const candidates = dedupeHits(hits).slice(0, JUDGE_CANDIDATES);
+	if (!judge || candidates.length === 0)
+		return {
+			query,
+			found,
+			score: candidates.length ? 50 : 0,
+			hits: candidates,
+		};
+
+	const numbered = candidates.map((h, i) => `${i + 1}. ${h.text}`).join("\n");
+	let raw: string;
+	try {
+		raw = await runModel(
+			ctx,
+			chain,
+			RECALL_JUDGE,
+			`TASK:\n${prompt}\n\nQUERY:\n${query}\n\nFACTS:\n${numbered}`,
+			{ maxTokens: 160, signal },
+		);
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		appendDebug(cwd, "recall.judge.error", {
+			query,
+			error: (err as Error).message,
+		});
+		// No judge available: keep the hits unscored rather than lose the query.
+		return { query, found, score: 50, hits: candidates };
+	}
+	const verdict = parseJudge(raw, candidates.length);
+	appendDebug(cwd, "recall.judge", {
+		query,
+		found,
+		candidates: candidates.length,
 		output: raw,
-		picked: [...picked],
+		score: verdict.score,
+		kept: verdict.keep.size,
+		valid: verdict.valid,
 	});
-	return hits.filter((_, i) => picked.has(i + 1));
+	// Unparseable verdict is a formatting failure, not a rejection: keep the hits
+	// (ranked below judged ones) instead of silently dropping the whole query.
+	if (!verdict.valid) return { query, found, score: 40, hits: candidates };
+	return {
+		query,
+		found,
+		score: verdict.score,
+		hits: candidates.filter((_, i) => verdict.keep.has(i + 1)),
+	};
+}
+
+/** Order-preserving dedupe of hits by normalized text. */
+function dedupeHits(hits: RecallHit[]): RecallHit[] {
+	const seen = new Set<string>();
+	const out: RecallHit[] = [];
+	for (const h of hits) {
+		const key = normalizeLine(h.text);
+		if (!key || seen.has(key)) continue;
+		seen.add(key);
+		out.push(h);
+	}
+	return out;
 }
 
 export async function runRecall(
 	ctx: ExtensionContext,
 	cfg: HindsightConfig,
 	client: HindsightClient,
-	resolved: ResolvedModel,
+	chain: ModelChain,
 	prompt: string,
 	signal?: AbortSignal,
 ): Promise<RecallInjectResult> {
@@ -141,31 +206,56 @@ export async function runRecall(
 	const eff = effortPlan(cfg.recallEffort);
 	appendDebug(cwd, "recall.gate.start", {
 		promptChars: prompt.length,
-		model: resolved.label,
+		model: chain.label,
 		effort: cfg.recallEffort,
 		maxQueries: eff.queries,
-		rounds: eff.rounds,
 		filter: cfg.recallFilter,
 	});
-	const gateRaw = await runModel(
-		ctx,
-		resolved,
-		QUERY_BUILDER,
-		`LATEST USER REQUEST:\n${prompt}\n\nRECENT CONTEXT:\n${recentContext(ctx, cfg.recallContextTokens)}\n\nMAX QUERIES: ${eff.queries}`,
-		{ maxTokens: 320, signal },
-	);
-	appendDebug(cwd, "recall.gate.raw", { output: gateRaw });
-	let plan = parseQueryPlan(gateRaw);
-	// If the cheap gate returns prose instead of JSON, fall back to a single bounded
-	// query built from the user's prompt (a short slice keeps it non-leaky).
-	if (!plan.shouldQuery && plan.reason === "query-builder returned non-JSON")
-		plan = {
-			shouldQuery: true,
-			op: "recall",
-			queries: [prompt.trim().slice(0, 240)],
-			reason: "fallback to user prompt (bounded)",
-		};
-	appendDebug(cwd, "recall.gate.plan", { ...plan });
+	// The query builder is what makes recall work: it rewrites the user's message
+	// into standalone bank queries. When EVERY model in the chain is down we must
+	// still search rather than skip memory entirely — degrade to keyword queries
+	// distilled from the prompt instead of shipping the raw message.
+	let plan: QueryPlan;
+	let degraded = false;
+	try {
+		const gateRaw = await runModel(
+			ctx,
+			chain,
+			QUERY_BUILDER,
+			`LATEST USER REQUEST:\n${prompt}\n\nRECENT CONTEXT:\n${recentContext(ctx, cfg.recallContextTokens)}\n\nMAX QUERIES: ${eff.queries}`,
+			{ maxTokens: 320, signal },
+		);
+		appendDebug(cwd, "recall.gate.raw", { output: gateRaw });
+		plan = parseQueryPlan(gateRaw);
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		appendDebug(cwd, "recall.gate.error", {
+			error: (err as Error).message,
+			chain: chain.label,
+		});
+		plan = { shouldQuery: false, op: "recall", queries: [], reason: "" };
+		degraded = true;
+	}
+	// Non-JSON from a weak model is the same failure mode as a dead provider:
+	// keep searching, just with keyword queries.
+	if (
+		!plan.shouldQuery &&
+		(degraded || !plan.reason || plan.reason.startsWith("query-builder"))
+	) {
+		const queries = heuristicQueries(prompt, eff.queries);
+		if (queries.length > 0) {
+			plan = {
+				shouldQuery: true,
+				op: "recall",
+				queries,
+				reason: degraded
+					? "query-builder unavailable — keyword fallback"
+					: "query-builder returned non-JSON — keyword fallback",
+			};
+			degraded = true;
+		}
+	}
+	appendDebug(cwd, "recall.gate.plan", { ...plan, degraded });
 	if (!plan.shouldQuery)
 		return {
 			...emptyRecall(),
@@ -174,27 +264,7 @@ export async function runRecall(
 
 	const queryLabel = plan.queries.join(" | ");
 	const seen = seenInjectedFacts(ctx);
-	const local = new Set<string>();
-	const pool: RecallHit[] = [];
-	let queriesUsed = 0;
-	let totalFound = 0;
 	const cap = Math.max(1, cfg.recallMaxQueries);
-	// Gather roughly twice the injection budget as candidates, then let the pick
-	// step choose the most relevant recallMaxLines.
-	const targetPool = Math.max(cfg.recallMaxLines * 2, cfg.recallMaxLines + 2);
-
-	const addHits = (hits: RecallHit[]): number => {
-		let added = 0;
-		totalFound += hits.length;
-		for (const hit of hits) {
-			const key = normalizeLine(hit.text);
-			if (!key || seen.has(key) || local.has(key)) continue;
-			local.add(key);
-			pool.push(hit);
-			added += 1;
-		}
-		return added;
-	};
 
 	if (plan.op === "reflect") {
 		// reflect composes a single answer from the bank's own context.
@@ -214,92 +284,88 @@ export async function runRecall(
 				queried: true,
 				reason: "bank reflected",
 			};
-		addHits(extractHits(res));
-	} else {
-		const runQueries = async (queries: string[]): Promise<number> => {
-			let added = 0;
-			for (const q of queries) {
-				if (queriesUsed >= cap) break;
-				queriesUsed += 1;
-				try {
-					added += addHits(await bankHits(client, q, cfg, signal));
-				} catch (err) {
-					appendDebug(cwd, "recall.bank.error", {
-						query: q,
-						error: (err as Error).message,
-					});
-				}
-				if (pool.length >= targetPool) break;
-			}
-			return added;
-		};
-		appendDebug(cwd, "recall.round", { round: 1, queries: plan.queries });
-		await runQueries(plan.queries);
-		// Refine rounds (thorough): ask for NEW angles based on what we already have,
-		// and stop as soon as the model has nothing to add or a round finds nothing.
-		for (
-			let round = 2;
-			round <= eff.rounds && queriesUsed < cap && pool.length < targetPool;
-			round += 1
-		) {
-			const factsSoFar = pool
-				.slice(0, 20)
-				.map((h, i) => `${i + 1}. ${h.text}`)
-				.join("\n");
-			const refineRaw = await runModel(
-				ctx,
-				resolved,
-				QUERY_REFINE,
-				`ORIGINAL REQUEST:\n${prompt}\n\nFACTS SO FAR:\n${factsSoFar || "(none)"}\n\nMAX QUERIES: ${eff.queries}`,
-				{ maxTokens: 256, signal },
-			);
-			const more = parseRefine(refineRaw);
-			appendDebug(cwd, "recall.refine", { round, more });
-			if (more.length === 0) break;
-			if ((await runQueries(more)) === 0) break;
-		}
-	}
-
-	appendDebug(cwd, "recall.pool", {
-		pool: pool.length,
-		queriesUsed,
-		totalFound,
-	});
-	if (pool.length === 0)
+		const hits = dedupeHits(extractHits(res)).filter(
+			(h) => !seen.has(normalizeLine(h.text)),
+		);
+		const kept = hits.slice(0, cfg.recallMaxLines);
 		return {
 			...emptyRecall(),
+			found: hits.length,
+			injected: kept.length,
+			text: kept.map((h) => `- ${h.text}`).join("\n"),
+			query: q,
+			operation: "reflect",
+			queried: true,
+			reason: kept.length ? "bank recalled facts" : "bank returned no facts",
+			rawHits: hits.map((h) => h.text),
+		};
+	}
+
+	// Each query is an independent recall: its own bank call and its own verdict,
+	// all in flight at once. Merging only afterwards is what lets a junk query be
+	// dropped whole instead of polluting one shared pool.
+	const queries = plan.queries.slice(0, cap);
+	const judge = cfg.recallFilter === "model" && !degraded;
+	appendDebug(cwd, "recall.queries", { queries, judge });
+	const outcomes = await Promise.all(
+		queries.map((q) =>
+			runOneQuery(ctx, cfg, client, chain, prompt, q, judge, signal),
+		),
+	);
+
+	const totalFound = outcomes.reduce((n, o) => n + o.found, 0);
+	// Best-scoring queries contribute their facts first, so when the line budget
+	// runs out it is the weakest query that loses its tail.
+	const ranked = [...outcomes].sort((a, b) => b.score - a.score);
+	const local = new Set<string>();
+	const merged: RecallHit[] = [];
+	let skippedSeen = 0;
+	for (const outcome of ranked) {
+		if (outcome.score < MIN_USEFUL_SCORE) continue; // judged worthless
+		for (const hit of outcome.hits) {
+			const key = normalizeLine(hit.text);
+			if (!key || local.has(key)) continue;
+			if (seen.has(key)) {
+				skippedSeen += 1;
+				continue;
+			}
+			local.add(key);
+			merged.push(hit);
+		}
+	}
+	appendDebug(cwd, "recall.merged", {
+		totalFound,
+		scores: outcomes.map((o) => ({ query: o.query, score: o.score })),
+		merged: merged.length,
+		skippedSeen,
+	});
+
+	const finalHits = merged.slice(0, cfg.recallMaxLines);
+	if (finalHits.length === 0) {
+		let reason = "recalled facts judged irrelevant";
+		if (totalFound === 0) reason = "bank returned no facts";
+		else if (skippedSeen > 0) reason = "all facts already injected";
+		return {
+			...emptyRecall(),
+			found: totalFound,
+			skippedSeen,
 			query: queryLabel,
 			operation: plan.op,
 			queried: true,
-			reason:
-				totalFound > 0
-					? "all facts already injected"
-					: "bank returned no facts",
+			reason,
 		};
-
-	// Bound candidates before the pick to keep the pick prompt small.
-	const candidates = pool.slice(0, Math.max(cfg.recallMaxLines * 3, 12));
-	const picked =
-		cfg.recallFilter === "model"
-			? await modelPick(ctx, resolved, prompt, candidates, signal)
-			: candidates;
-	const finalHits = picked.slice(0, cfg.recallMaxLines);
-	appendDebug(cwd, "recall.pick.done", {
-		candidates: candidates.length,
-		picked: picked.length,
-		injected: finalHits.length,
-	});
+	}
 	const text = finalHits.map((h) => `- ${h.text}`).join("\n");
 	return {
 		found: totalFound,
 		injected: finalHits.length,
-		skippedSeen: 0,
-		skippedFiltered: candidates.length - finalHits.length,
+		skippedSeen,
+		skippedFiltered: merged.length - finalHits.length,
 		text,
 		query: queryLabel,
 		operation: plan.op,
 		queried: true,
-		reason: "bank recalled facts",
-		rawHits: pool.map((h) => h.text),
+		reason: degraded ? `${plan.reason} (degraded)` : "bank recalled facts",
+		rawHits: merged.map((h) => h.text),
 	};
 }

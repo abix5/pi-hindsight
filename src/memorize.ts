@@ -20,7 +20,7 @@ import type {
 import type { HindsightConfig } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug, appendLog } from "./log.ts";
-import { type ResolvedModel, resolveModel, runModel } from "./model.ts";
+import { type ModelChain, resolveChain, runModel } from "./model.ts";
 import {
 	buildDedupPrompt,
 	buildDedupQueriesPrompt,
@@ -296,8 +296,8 @@ export class Memorizer {
 			docId,
 		});
 
-		const resolved = resolveModel(ctx, cfg);
-		if (!resolved) {
+		const chain = resolveChain(ctx, cfg);
+		if (!chain) {
 			this.deps.status.memoError("model unavailable");
 			appendLog(cwd, cfg.logPath, {
 				type: "error",
@@ -310,13 +310,13 @@ export class Memorizer {
 
 		const chunks = chunkByWindow(
 			deltaText,
-			resolved.model.contextWindow,
+			chain.primary.model.contextWindow,
 			cfg.chunkInputFraction,
 		);
 		appendDebug(cwd, "memorize.chunks", {
 			reason,
-			model: resolved.label,
-			contextWindow: resolved.model.contextWindow,
+			model: chain.label,
+			contextWindow: chain.primary.model.contextWindow,
 			chunks: chunks.length,
 			chunkChars: chunks.map((c) => c.length),
 		});
@@ -339,7 +339,7 @@ export class Memorizer {
 				reason,
 				chunks: chunks.length,
 			});
-			await this.runInline(ctx, resolved, chunks, deltaText, docId);
+			await this.runInline(ctx, chain, chunks, deltaText, docId);
 			if (lastId) {
 				saveState(pi, {
 					watermark: lastId,
@@ -385,7 +385,7 @@ export class Memorizer {
 	 */
 	private async runInline(
 		ctx: ExtensionContext,
-		resolved: ResolvedModel,
+		chain: ModelChain,
 		chunks: string[],
 		deltaText: string,
 		docId: string,
@@ -399,7 +399,7 @@ export class Memorizer {
 		const notes: string[] = [];
 		for (const [i, chunk] of chunks.entries()) {
 			const out = cleanProse(
-				await runModel(ctx, resolved, buildExtractPrompt(cfg), chunk, {
+				await runModel(ctx, chain, buildExtractPrompt(cfg), chunk, {
 					maxTokens: 1536,
 				}),
 			);
@@ -443,7 +443,7 @@ export class Memorizer {
 				const merged = cleanProse(
 					await runModel(
 						ctx,
-						resolved,
+						chain,
 						buildMergePrompt(cfg),
 						`PRIOR SUMMARY:\n${prior || "(empty)"}\n\nNOTES:\n${note}`,
 						{ maxTokens: 2048 },
@@ -475,7 +475,7 @@ export class Memorizer {
 		// verify: only when the delta fits one window (else trust distil+merge).
 		// Never zero-out on a flaky reply — keep the note if verify returns empty.
 		const verifyBudget = Math.floor(
-			resolved.model.contextWindow * cfg.chunkInputFraction * 4,
+			chain.primary.model.contextWindow * cfg.chunkInputFraction * 4,
 		);
 		if (deltaText.length <= verifyBudget) {
 			try {
@@ -487,7 +487,7 @@ export class Memorizer {
 				const verified = cleanProse(
 					await runModel(
 						ctx,
-						resolved,
+						chain,
 						buildVerifyPrompt(cfg),
 						`TRANSCRIPT:\n${deltaText}\n\nNOTE:\n${note}`,
 						{ maxTokens: 2048 },
@@ -549,7 +549,7 @@ export class Memorizer {
 			try {
 				const raw = await runModel(
 					ctx,
-					resolved,
+					chain,
 					buildDedupQueriesPrompt(cfg),
 					`NOTE:\n${note}`,
 					{ maxTokens: 320 },
@@ -607,7 +607,7 @@ export class Memorizer {
 				const deduped = cleanProse(
 					await runModel(
 						ctx,
-						resolved,
+						chain,
 						buildDedupPrompt(cfg),
 						`EXISTING MEMORY:\n${existing}\n\nNOTE:\n${note}`,
 						{ maxTokens: 2048 },
@@ -671,7 +671,7 @@ export class Memorizer {
 			const summary = cleanProse(
 				await runModel(
 					ctx,
-					resolved,
+					chain,
 					buildSummarizePrompt(cfg),
 					`PREVIOUS:\n${prior || "(empty)"}\n\nNEW NOTE:\n${note}`,
 					{ maxTokens: cfg.summaryMaxTokens },

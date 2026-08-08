@@ -8,11 +8,10 @@ import { registerCommands } from "./commands.ts";
 import { HindsightClient } from "./hindsight.ts";
 import { appendDebug, appendLog, setDebugEnabled } from "./log.ts";
 import { Memorizer } from "./memorize.ts";
-import { resolveModel } from "./model.ts";
+import { resolveChain } from "./model.ts";
 import { runRecall } from "./recall.ts";
 import { loadState, saveState } from "./state.ts";
 import { registerTools } from "./tools.ts";
-import { stopReviewServer } from "./review-server.ts";
 import { HindsightStatus } from "./ui.ts";
 
 function recallTrace(recall: Awaited<ReturnType<typeof runRecall>>): string {
@@ -136,6 +135,15 @@ export default function (pi: ExtensionAPI) {
 	let memorizer: Memorizer | undefined;
 	let countsTimer: ReturnType<typeof setInterval> | undefined;
 	const status = new HindsightStatus();
+
+	// Recall runs in `before_agent_start` so its result can be injected as a VISIBLE
+	// custom_message block (the only entry type that both renders in the TUI and
+	// reaches the model). That phase is pre-turn/preflight: the agent loop has not
+	// started, so `ctx.signal` is NOT wired to Esc here and `emitBeforeAgentStart`
+	// swallows handler errors — i.e. Esc CANNOT cancel the bank call mid-flight; the
+	// widget says so ("waiting for bank… (until it answers)"). The ceiling only stops
+	// a stuck bank from hanging the turn start forever.
+	const RECALL_CEILING_MS = 30000;
 	// Session-level runtime state that commands can flip WITHOUT editing config:
 	// the auto-recall / auto-memorize switches (default from config), and the
 	// pending /mem-retain capture (set by the command, closed on the next
@@ -151,9 +159,6 @@ export default function (pi: ExtensionAPI) {
 		if (countsTimer) clearInterval(countsTimer);
 		countsTimer = undefined;
 		memorizer?.dispose();
-		// Close the /mem dashboard HTTP server so a retired instance does not leave a
-		// listening socket behind after a /reload.
-		stopReviewServer();
 		status.clear();
 	};
 
@@ -260,6 +265,11 @@ export default function (pi: ExtensionAPI) {
 		}
 	});
 
+	// Pre-turn recall: query the bank and return a VISIBLE recall block that both
+	// renders in the TUI and reaches the model (a custom_message). This runs in
+	// preflight, so Esc does NOT cancel the bank call here — the widget says the
+	// wait clears only when the bank answers. The ceiling stops a stuck bank from
+	// hanging the turn start forever.
 	pi.on("before_agent_start", async (event, ctx) => {
 		appendDebug(ctx.cwd ?? process.cwd(), "event.before_agent_start", {
 			promptChars: event.prompt.length,
@@ -271,20 +281,27 @@ export default function (pi: ExtensionAPI) {
 			status.recallOff();
 			return;
 		}
-		const resolved = resolveModel(ctx, cfg, "recall");
-		if (!resolved) {
+		const chain = resolveChain(ctx, cfg, "recall");
+		if (!chain) {
 			status.recallDone(0);
 			return;
 		}
-		status.recallStart();
+		status.recallStart(); // widget: "waiting for bank… (clears when it answers)"
+		const cwd = ctx.cwd ?? process.cwd();
+		// Best-effort abort wiring + hard ceiling. Esc is not reliably delivered in
+		// preflight, so the ceiling is the real guard against a stuck bank.
+		const ac = new AbortController();
+		const onAbort = () => ac.abort();
+		ctx.signal?.addEventListener("abort", onAbort, { once: true });
+		const ceiling = setTimeout(() => ac.abort(), RECALL_CEILING_MS);
 		try {
 			const recall = await runRecall(
 				ctx,
 				cfg,
 				client,
-				resolved,
+				chain,
 				event.prompt,
-				ctx.signal,
+				ac.signal,
 			);
 			status.recallOutcome({
 				op: recall.operation,
@@ -295,7 +312,7 @@ export default function (pi: ExtensionAPI) {
 				reason: recall.reason,
 			});
 			const skipped = recall.skippedSeen + recall.skippedFiltered;
-			appendLog(ctx.cwd ?? process.cwd(), cfg.logPath, {
+			appendLog(cwd, cfg.logPath, {
 				type: recall.operation === "reflect" ? "reflect" : "recall",
 				user: event.prompt,
 				query: recall.query,
@@ -308,19 +325,23 @@ export default function (pi: ExtensionAPI) {
 				injectedText: recall.text,
 				rawHits: recall.rawHits,
 			});
-			return {
-				message: {
-					customType: "mem-recall",
-					content: recallTrace(recall),
-					display: true,
-				},
-			};
+			if (recall.queried && recall.text)
+				return {
+					message: {
+						customType: "mem-recall",
+						content: recallTrace(recall),
+						display: true,
+					},
+				};
 		} catch (err) {
-			appendDebug(ctx.cwd ?? process.cwd(), "event.before_agent_start.error", {
+			appendDebug(cwd, "event.before_agent_start.error", {
 				error: (err as Error).message,
+				aborted: ac.signal.aborted,
 			});
 			status.recallDone(0);
-			console.error("\uD83E\uDDE0 recall failed:", (err as Error).message);
+		} finally {
+			clearTimeout(ceiling);
+			ctx.signal?.removeEventListener("abort", onAbort);
 		}
 	});
 
