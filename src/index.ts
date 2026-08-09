@@ -96,10 +96,36 @@ function localDevLoaderPresent(cwd: string): boolean {
  * two discovery paths resolving to different file paths). Each run owns its own
  * status + background timer; without disposing the old one, the old timer keeps
  * rendering an OLD widget and the two fight = the widget "jumps" between
- * versions. We stash a disposer on globalThis so every new run tears the
+ * versions. We stash a disposer on globalThis so every new HOST run tears the
  * previous one down first, guaranteeing a single live widget writer.
+ *
+ * The handshake happens at session_start (not factory time): pi-extensible-
+ * workflows runs its workflow agents as IN-PROCESS sessions that load
+ * extensions again inside the host's process, and an agent instance must never
+ * dispose the host's timer/widget/Memorizer. Only a session that decided it IS
+ * the host (see isWorkflowAgentSession) touches this handle.
  */
 type HindsightGlobal = { __piHindsightDispose?: () => void };
+
+/**
+ * True when this SESSION is an in-process workflow agent run from
+ * pi-extensible-workflows (PEW). PEW labels every agent session
+ * `${workflowName}:${label}:attempt-${n}` and installs the label via
+ * `manager.appendSessionInfo()` BEFORE extensions load, so it is readable at
+ * session_start through `ctx.sessionManager.getSessionName()` (also on resume:
+ * the label persists in the session file).
+ *
+ * These sessions run in the HOST's own process — not a subprocess — so
+ * argv/env checks (`--no-session`, `--mem-only-tools`) cannot see them. In
+ * such a session the extension stands down: no widget, no timers, no
+ * Memorizer, no automatic recall/retain — a workflow agent sees only a
+ * fragment of the work, does not know the outcome, and runs again on every
+ * retry, so automatic writes would poison the bank. The hindsight_* tools stay
+ * registered so agents can still deliberately read (or write) memory.
+ */
+export function isWorkflowAgentSession(name: string | undefined): boolean {
+	return typeof name === "string" && /^.+:.+:attempt-\d+$/.test(name);
+}
 
 export default function (pi: ExtensionAPI) {
 	let cfg: HindsightConfig | undefined;
@@ -144,15 +170,13 @@ export default function (pi: ExtensionAPI) {
 		return;
 	}
 
-	// Tear down any previous instance still alive in this process.
-	const g = globalThis as unknown as HindsightGlobal;
-	if (g.__piHindsightDispose) {
-		try {
-			g.__piHindsightDispose();
-		} catch {
-			/* best effort */
-		}
-	}
+	// Stand-down state for in-process PEW workflow agent sessions. Decided at
+	// session_start (the earliest point where the session label is readable);
+	// every auto hook checks it first. Per-instance closure state on purpose:
+	// the module may be cached and shared between the host's loader and an
+	// agent's loader, so a truly module-global flag could leak the agent's
+	// stand-down into the host's hooks.
+	let standDown = false;
 
 	let memorizer: Memorizer | undefined;
 	let countsTimer: ReturnType<typeof setInterval> | undefined;
@@ -176,8 +200,10 @@ export default function (pi: ExtensionAPI) {
 		pendingRemember: undefined as { startId: string } | undefined,
 	};
 
-	// Register THIS instance's disposer, so the next (re)load can retire us cleanly.
-	g.__piHindsightDispose = () => {
+	// THIS instance's disposer. Registered on globalThis only once this instance
+	// has decided it is a HOST session (in session_start), so a workflow agent
+	// instance never overwrites — or triggers — the host's disposer.
+	const disposeSelf = () => {
 		if (countsTimer) clearInterval(countsTimer);
 		countsTimer = undefined;
 		memorizer?.dispose();
@@ -224,11 +250,40 @@ export default function (pi: ExtensionAPI) {
 		countsTimer.unref?.();
 	};
 
-	init(process.cwd());
 	registerTools(pi, getState);
 	registerCommands(pi, getState, () => memorizer, status, runtime);
 
 	pi.on("session_start", async (_event, ctx) => {
+		const sessionName = ctx.sessionManager?.getSessionName?.();
+		standDown = isWorkflowAgentSession(sessionName);
+		if (standDown) {
+			// In-process workflow agent: initialize NOTHING (no widget, no timers,
+			// no Memorizer) and leave the host's global disposer untouched. Load
+			// config + client only, so the registered hindsight_* tools still work
+			// (agents may read memory deliberately via hindsight_recall).
+			try {
+				cfg = loadConfig(ctx.cwd ?? process.cwd());
+				client = new HindsightClient(cfg);
+				setDebugEnabled(cfg.debug);
+			} catch {
+				/* getState stays undefined; tools then report "not initialized" */
+			}
+			appendDebug(ctx.cwd ?? process.cwd(), "event.session_start.standdown", {
+				sessionName,
+			});
+			return;
+		}
+		// Host session: tear down any previous HOST instance still alive in this
+		// process, then take over the global disposer handle.
+		const g = globalThis as unknown as HindsightGlobal;
+		if (g.__piHindsightDispose && g.__piHindsightDispose !== disposeSelf) {
+			try {
+				g.__piHindsightDispose();
+			} catch {
+				/* best effort */
+			}
+		}
+		g.__piHindsightDispose = disposeSelf;
 		init(ctx.cwd ?? process.cwd());
 		appendDebug(ctx.cwd ?? process.cwd(), "event.session_start", {
 			cwd: ctx.cwd ?? process.cwd(),
@@ -293,6 +348,7 @@ export default function (pi: ExtensionAPI) {
 	// wait clears only when the bank answers. The ceiling stops a stuck bank from
 	// hanging the turn start forever.
 	pi.on("before_agent_start", async (event, ctx) => {
+		if (standDown) return;
 		appendDebug(ctx.cwd ?? process.cwd(), "event.before_agent_start", {
 			promptChars: event.prompt.length,
 			autoRecall: cfg?.autoRecall,
@@ -368,6 +424,7 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
+		if (standDown) return;
 		const cwd = ctx.cwd ?? process.cwd();
 		// firstKeptEntryId marks the compaction boundary: everything BEFORE it is
 		// summarized away, the tail from it onward stays live. We memorize exactly
@@ -392,6 +449,7 @@ export default function (pi: ExtensionAPI) {
 	// its study turn; when that turn ends we record (start, end] as a saved range so
 	// the next memorize wraps it in ALREADY-SAVED markers and does not re-extract it.
 	pi.on("turn_end", async (_event, ctx) => {
+		if (standDown) return;
 		if (!runtime.pendingRemember) return;
 		const { startId } = runtime.pendingRemember;
 		runtime.pendingRemember = undefined;
@@ -421,6 +479,7 @@ export default function (pi: ExtensionAPI) {
 	// the async write completes first — bounded by a 60s cap so quitting can
 	// never hang.
 	pi.on("session_shutdown", async (event, ctx) => {
+		if (standDown) return;
 		const cwd = ctx.cwd ?? process.cwd();
 		appendDebug(cwd, "event.session_shutdown", {
 			reason: event.reason,
