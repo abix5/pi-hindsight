@@ -48,6 +48,7 @@ check: ## Typecheck + run the self-tests
 	bun scripts/bank-reminder.test.ts
 	bun scripts/fact-invalidation.test.ts
 	bun scripts/widget.test.ts
+	bun scripts/write-hygiene.test.ts
 	npm test
 
 publish: check ## Typecheck, then publish to npm (needs auth)

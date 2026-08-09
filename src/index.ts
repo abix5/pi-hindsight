@@ -540,7 +540,7 @@ export default function (pi: ExtensionAPI) {
 		return {
 			message: {
 				customType: "mem-reminder",
-				content: reminderText(cfg.bankId, bankCounts),
+				content: reminderText(cfg.bankId, bankCounts, cfg.memoryLanguage),
 				display: true,
 			},
 		};

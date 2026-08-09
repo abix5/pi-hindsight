@@ -36,6 +36,7 @@ import {
 	parseInvalidations,
 	type RecallHit,
 } from "./recall-utils.ts";
+import { retainContext, retainMetadata } from "./retain-hygiene.ts";
 import {
 	computeDocId,
 	loadState,
@@ -377,7 +378,7 @@ export class Memorizer {
 				reason,
 				chunks: chunks.length,
 			});
-			await this.runInline(ctx, chain, chunks, deltaText, docId);
+			await this.runInline(ctx, chain, chunks, deltaText, docId, sessionId);
 			if (lastId) {
 				const saved = saveState(pi, {
 					watermark: lastId,
@@ -429,6 +430,7 @@ export class Memorizer {
 		chunks: string[],
 		deltaText: string,
 		docId: string,
+		sessionId: string,
 	): Promise<"done" | "blocked"> {
 		const { cfg } = this.deps;
 		const cwd = ctx.cwd ?? process.cwd();
@@ -692,14 +694,19 @@ export class Memorizer {
 		});
 		// async:true — the server queues the extraction; we do not wait for the bank
 		// to finish processing. The widget counters refresh in the background later.
+		const provenance = {
+			project: path.basename(cwd),
+			language: cfg.memoryLanguage,
+			session: sessionId,
+		};
 		await this.deps.client.retain(note, {
 			tags: [cfg.bankId, "agent-summary"],
 			// Stable id → re-ingesting the same window upserts instead of duplicating.
 			documentId: docId,
-			// `context` is injected directly into Hindsight's fact-extraction prompt and
-			// shapes HOW facts are pulled from this document — the API docs call it one of
-			// the highest-leverage quality levers. Describe what the report actually is.
-			context: `Curated long-term engineering notes from a pair-programming session between a software engineer and their AI coding agent on one software project. Every line is already-distilled durable knowledge, so treat each as an established fact about this project, not chit-chat or momentary state. Categories: architectural and design decisions with rationale; standing user constraints and preferences; verified know-how (commands, procedures, fixes that worked); pitfalls (approaches tried that failed, and why); and concrete facts and locations (file paths, endpoints, config keys, ports, env-var names). Record where secrets live, never their values. The note is written in ${cfg.memoryLanguage}.`,
+			// Both go into the server's extraction prompt; see retain-hygiene.ts for
+			// what each word there is buying.
+			context: retainContext("session-note", provenance),
+			metadata: retainMetadata("session-note", provenance),
 			async: true,
 		});
 		appendDebug(cwd, "memorize.retain.done", {
