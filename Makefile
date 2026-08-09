@@ -44,6 +44,7 @@ check: ## Typecheck + run the self-tests
 	bun scripts/model-chain.test.ts
 	bun scripts/mem-panel.test.ts
 	bun scripts/recall-judge.test.ts
+	bun scripts/task-detector.test.ts
 	npm test
 
 publish: check ## Typecheck, then publish to npm (needs auth)

@@ -18,6 +18,47 @@ import { appendDebug } from "./log.ts";
 
 type AnyModel = NonNullable<ExtensionContext["model"]>;
 
+/**
+ * One turn of a service conversation. Only the task detector needs history;
+ * every other caller still passes a bare string (one user message).
+ */
+export interface ModelMessage {
+	role: "user" | "assistant";
+	text: string;
+}
+
+export interface RunOptions {
+	maxTokens?: number;
+	signal?: AbortSignal;
+	/**
+	 * Prompt-cache preference. A growing conversation re-sends the same prefix
+	 * every turn, so caching is always worth it here: break-even is ~83 tokens of
+	 * prefix (a third of one exchange) and the write surcharge when it goes unused
+	 * is fifteen millionths of a cent. Hence no conditional logic — callers with
+	 * history just ask for it.
+	 */
+	cacheRetention?: "none" | "short" | "long";
+	/** Session affinity, so a provider that routes by session keeps hitting the same cache. */
+	sessionId?: string;
+}
+
+/**
+ * Turn the caller's input into pi-ai messages.
+ *
+ * Assistant turns are cast rather than fully constructed: `AssistantMessage`
+ * demands api/provider/model/usage/cost bookkeeping that only a real response
+ * has, while providers serializing a request read nothing but role + content.
+ */
+export function buildMessages(input: string | ModelMessage[]): unknown[] {
+	const turns: ModelMessage[] =
+		typeof input === "string" ? [{ role: "user", text: input }] : input;
+	return turns.map((t) => ({
+		role: t.role,
+		content: [{ type: "text" as const, text: t.text }],
+		timestamp: Date.now(),
+	}));
+}
+
 export interface ResolvedModel {
 	model: AnyModel;
 	label: string;
@@ -102,15 +143,15 @@ export async function runModel(
 	ctx: ExtensionContext,
 	chain: ModelChain,
 	systemPrompt: string,
-	userText: string,
-	opts: { maxTokens?: number; signal?: AbortSignal } = {},
+	input: string | ModelMessage[],
+	opts: RunOptions = {},
 ): Promise<string> {
 	if (!ctx.modelRegistry) throw new Error("modelRegistry unavailable");
 	const cwd = ctx.cwd ?? process.cwd();
 	let lastError: unknown;
 	for (const [index, resolved] of chain.candidates.entries()) {
 		try {
-			return await runOne(ctx, resolved, systemPrompt, userText, opts);
+			return await runOne(ctx, resolved, systemPrompt, input, opts);
 		} catch (err) {
 			if (isAbort(err) || opts.signal?.aborted) throw err;
 			lastError = err;
@@ -131,8 +172,8 @@ async function runOne(
 	ctx: ExtensionContext,
 	resolved: ResolvedModel,
 	systemPrompt: string,
-	userText: string,
-	opts: { maxTokens?: number; signal?: AbortSignal },
+	input: string | ModelMessage[],
+	opts: RunOptions,
 ): Promise<string> {
 	if (!ctx.modelRegistry) throw new Error("modelRegistry unavailable");
 	const auth = await ctx.modelRegistry.getApiKeyAndHeaders(resolved.model);
@@ -143,13 +184,9 @@ async function runOne(
 		resolved.model,
 		{
 			systemPrompt,
-			messages: [
-				{
-					role: "user" as const,
-					content: [{ type: "text" as const, text: userText }],
-					timestamp: Date.now(),
-				},
-			],
+			messages: buildMessages(input) as Parameters<
+				typeof complete
+			>[1]["messages"],
 		},
 		{
 			apiKey: auth.apiKey,
@@ -157,6 +194,8 @@ async function runOne(
 			env: auth.env,
 			maxTokens: opts.maxTokens,
 			signal: opts.signal,
+			cacheRetention: opts.cacheRetention,
+			sessionId: opts.sessionId,
 		},
 	);
 
