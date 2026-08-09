@@ -90,6 +90,31 @@ frame("store done", (s) => {
 	s.setBankCounts(16, 153);
 	s.memoDone(2, 9);
 });
+// A kill is rare and newsworthy: it gets three columns in the FIXED head
+// (`153f↓3`), so it survives while the last action is truncated away.
+frame("store done with kills", (s) => {
+	s.bankOk();
+	s.setBankCounts(16, 153);
+	s.memoRetired(3);
+	s.memoDone(2, 9);
+});
+frame("kills, worst-case head", (s) => {
+	s.bankOk();
+	s.setBankCounts(999999, 999999);
+	s.memoRetired(999);
+	s.recallOutcome({
+		op: "recall",
+		query: LONG,
+		found: 12,
+		injected: 3,
+		queried: true,
+		reason: "",
+	});
+});
+frame("kills while the bank is unreachable", (s) => {
+	s.memoRetired(2);
+	s.bankError("fetch failed: connect ECONNREFUSED 127.0.0.1:7078 (retrying)");
+});
 frame("bank error", (s) => {
 	s.bankError("fetch failed: connect ECONNREFUSED 127.0.0.1:7078 (retrying)");
 });
@@ -127,6 +152,8 @@ for (const step of [
 		}),
 	() => s.memoCollecting(2, "manual"),
 	() => s.memoWriting(),
+	() => s.memoRetired(0),
+	() => s.memoRetired(4),
 	() => s.memoDone(1, 4),
 	() => s.memoBlocked(),
 	() => s.memoError("boom"),
@@ -138,6 +165,30 @@ for (const step of [
 	heights.add((widget ?? []).length);
 }
 check("height never changes across a session", [...heights], [1]);
+
+// The badge is cumulative for the SESSION, not for the last write: a kill that
+// only showed until the next write would be gone before anyone read it.
+const k = new HindsightStatus();
+k.attach(ui);
+k.setBank("bank", "http://localhost:7078");
+k.bankOk();
+k.setBankCounts(16, 153);
+check("no kills, no badge", strip((widget ?? [])[0] ?? "").includes("\u2193"), false);
+k.memoRetired(2);
+k.memoDone(1, 4);
+k.memoRetired(1);
+k.memoDone(1, 2);
+check(
+	"kills accumulate across writes",
+	strip((widget ?? [])[0] ?? "").includes("153f\u21933"),
+	true,
+);
+k.memoRetired(0);
+check(
+	"a zero-kill write does not touch the badge",
+	strip((widget ?? [])[0] ?? "").includes("153f\u21933"),
+	true,
+);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);

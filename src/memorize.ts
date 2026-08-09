@@ -99,20 +99,28 @@ function countBullets(note: string): number {
 	return bullets || lines.filter(Boolean).length;
 }
 
-/** Longest a single subject may be before it is cut on a word boundary. */
-const SUBJECT_MAX = 34;
-/** How many subjects the one-line notice names before it says "+N more". */
-const SUBJECT_COUNT = 2;
+/**
+ * Longest a single subject may be before it is cut on a word boundary. One
+ * subject owns a whole line now, so the budget is a terminal line minus the
+ * `  · ` indent — wide enough that a normal bullet arrives whole instead of
+ * being guillotined mid-word.
+ */
+const SUBJECT_MAX = 68;
+/** How many subjects the notice lists before it collapses the rest into "+N more". */
+const SUBJECT_COUNT = 5;
 
 /**
  * Reduce one note line to its subject: the opening words, which is where a
  * distilled bullet names what it is about.
  *
  * Everything a terminal must never see is stripped here, because the result
- * lands in `ctx.ui.notify` — the TUI passes it through `theme.fg("dim", …)` into
- * ONE status Text node, and RPC clients get it as a single JSON string they are
- * free to render on one line. So: ANSI first (the escape AND its payload), then
- * every control char including newlines and tabs, then markdown noise.
+ * lands in `ctx.ui.notify`. The TUI puts it through `theme.fg("dim", …)` into a
+ * chat `Text` node whose wrapper splits on `\n` and re-emits the active ANSI per
+ * line (verified against pi-tui's `wrapTextWithAnsi`), so newlines are fine —
+ * but RPC clients get the message as a raw string, so ANSI and every other
+ * control char are not. Newlines belong to the notice's own layout, never to a
+ * subject: so ANSI first (the escape AND its payload), then every control char
+ * including newlines and tabs, then markdown noise.
  * Returns "" when nothing legible survives — the caller degrades to counts.
  */
 function lineSubject(raw: string): string {
@@ -163,23 +171,34 @@ function retiredSuffix(invalidated: number): string {
 }
 
 /**
- * The post-write notification line: WHAT went into the bank, not just how much.
+ * The post-write notice: WHAT went into the bank, not just how much.
  *
- * The document count it replaces was noise (the inline path always writes
- * exactly one), and a line count alone never tells the user whether the right
- * things were stored. The note is already distilled prose whose bullets name
- * their own subjects, so the summary is derived from it — no extra model call.
- * One short line: two subjects, then "+N more", then any kills.
+ * A headline of counts, then one line per subject:
+ *
+ *     saved 1 note · 3 lines · 2 facts retired
+ *       · Recall effort is a real ceiling, not a prompt anchor.
+ *       · Never commit `.pi/hindsight.json`.
+ *
+ * Multi-line because the destination is an ordinary chat text node, not a status
+ * bar — squeezing the same content onto one line only bought truncation at 34
+ * characters and a `(+N more)` that hid most of the write. The note is already
+ * distilled prose whose bullets name their own subjects, so this is derived from
+ * it with no extra model call. "1 note" is literal: the inline path writes
+ * exactly one document, which is what the user is being told about.
+ *
+ * Still a notice, not a report: at most SUBJECT_COUNT subjects, and only a
+ * genuinely long note is allowed to hide a remainder behind "+N more". An
+ * unparseable note degrades to the headline alone.
  */
 export function writeNotice(note: string, invalidated = 0): string {
 	const lines = countBullets(note);
+	const head = `saved 1 note \u00b7 ${lines} line${lines === 1 ? "" : "s"}${retiredSuffix(invalidated)}`;
 	const subjects = noteSubjects(note);
-	const tail = retiredSuffix(invalidated);
-	if (subjects.length === 0) return `wrote ${lines} note lines${tail}`;
-	const shown = subjects.slice(0, SUBJECT_COUNT);
-	const rest = subjects.length - shown.length;
-	const more = rest > 0 ? ` (+${rest} more)` : "";
-	return `saved ${lines} line${lines === 1 ? "" : "s"}: ${shown.join("; ")}${more}${tail}`;
+	if (subjects.length === 0) return head;
+	const body = subjects.slice(0, SUBJECT_COUNT).map((s) => `  \u00b7 ${s}`);
+	const rest = subjects.length - SUBJECT_COUNT;
+	if (rest > 0) body.push(`  \u00b7 +${rest} more`);
+	return [head, ...body].join("\n");
 }
 
 /**
@@ -728,6 +747,10 @@ export class Memorizer {
 			// dedup: a note that turns out fully duplicate returns early below, and
 			// that is exactly the run where the bank is most likely holding orphans.
 			invalidated = await this.invalidateOrphans(ctx, chain, facts, deltaText);
+			// A kill is rare and newsworthy, and the notice that reports it scrolls
+			// away. Put it on the always-on widget too, from the ONE place that knows
+			// the count — the blocked path below returns before the write finishes.
+			this.deps.status.memoRetired(invalidated);
 			if (facts.length === 0) {
 				// Bank knows nothing on this topic → nothing to dedup against. Keep the
 				// note unchanged (do NOT spend a model call).
