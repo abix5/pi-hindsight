@@ -2,7 +2,7 @@
  * Persistent status surface for pi-hindsight.
  *
  * A single widget block above the editor (same primitive todo/plan-mode use)
- * shows bank connection + live recall/memorize state on exactly two lines. There
+ * shows bank connection + live recall/memorize state on exactly ONE line. There
  * is deliberately no status-bar strip: it duplicated the widget's dot. Any strip
  * left by an older version is cleared on the next render.
  *
@@ -34,17 +34,41 @@ type MemoPhase =
 	| "error";
 
 function trunc(s: string, n: number): string {
-	return s.length > n ? `${s.slice(0, n)}…` : s;
+	if (n <= 1) return "";
+	// A newline inside a bank error message would render as a SECOND widget row,
+	// so every variable fragment is flattened here, on the one path they share.
+	const flat = s.replace(/\s+/g, " ").trim();
+	return flat.length > n ? `${flat.slice(0, n - 1)}…` : flat;
 }
+
+/**
+ * Visible columns of a plain (un-styled) fragment. The brain glyph is the only
+ * double-width character the widget emits; everything else is 1 column.
+ */
+function width(s: string): number {
+	return [...s].length + (s.includes("🧠") ? 1 : 0);
+}
+
+/**
+ * Hard cap on the rendered line. The widget must occupy the SAME number of rows
+ * on every frame or the TUI flickers; with one emitted line the only way the
+ * height can still change is the host wrapping it, so the line is kept short
+ * enough to fit a narrow terminal instead of relying on the terminal width
+ * (which setWidget does not expose).
+ */
+const MAX_COLS = 72;
 
 export class HindsightStatus {
 	private ui: Ui | undefined;
 	/**
-	 * Stable "last action" text for the widget's second line. It is only ever
-	 * UPDATED, never cleared, so the second line never flickers in/out (which was
-	 * the blinking bug caused by conditionally clearing the recall query).
+	 * Rolling "last action", stored as PLAIN text plus a tone. Styling is applied
+	 * at render time, after truncation — pre-styled strings cannot be shortened
+	 * without an ANSI-aware cutter that would otherwise corrupt the colour codes.
 	 */
-	private lastAction = "";
+	private lastAction: { text: string; tone: ThemeColor } = {
+		text: "",
+		tone: "dim",
+	};
 	private bank = {
 		id: "",
 		host: "",
@@ -123,9 +147,9 @@ export class HindsightStatus {
 	recallStart(): void {
 		this.recall.off = false;
 		this.recall.active = true;
-		// Line 2 is explicit that the wait is uninterruptible: Esc cannot cancel the
-		// preflight bank call, so it only clears once the bank actually answers.
-		this.lastAction = this.c("dim", "↙ waiting for bank… (clears on reply)");
+		// Explicit that the wait is uninterruptible: Esc cannot cancel the preflight
+		// bank call, so it only clears once the bank actually answers.
+		this.lastAction = { text: "↙ waiting for bank… (clears on reply)", tone: "dim" };
 		this.render();
 	}
 	recallDone(count: number): void {
@@ -135,9 +159,9 @@ export class HindsightStatus {
 		this.render();
 	}
 	/**
-	 * Final recall result on line 2: the op, the exact query sent to the bank, and
-	 * how many facts it found vs. how many were injected (fresh) into context. This
-	 * is the "what did memory look up / what did it inject" the user wants to see.
+	 * Final recall result: the op, the query sent to the bank, and how many facts
+	 * it found vs. how many were injected (fresh) into context. This is the "what
+	 * did memory look up / what did it inject" the user wants to see.
 	 */
 	recallOutcome(info: {
 		op: "recall" | "reflect";
@@ -151,7 +175,7 @@ export class HindsightStatus {
 		this.recall.lastCount = info.injected;
 		if (info.injected > 0) this.recall.session += 1;
 		if (info.query.trim()) this.recall.lastQuery = info.query.trim();
-		this.lastAction = this.recallLine(info);
+		this.lastAction = { text: this.recallLine(info), tone: "dim" };
 		this.render();
 	}
 
@@ -163,15 +187,19 @@ export class HindsightStatus {
 		queried: boolean;
 		reason: string;
 	}): string {
-		const dim = (t: string) => this.c("dim", t);
-		if (!info.queried) return dim(`↙ skipped (${trunc(info.reason, 50)})`);
-		const q = trunc(info.query || "(empty)", 56);
-		const head = dim(`↙ ${info.op} · ${q}`);
-		if (info.op === "reflect")
-			return `${head} ${dim(info.injected > 0 ? "· answered" : "· no answer")}`;
-		if (info.found === 0) return `${head} ${dim("· nothing found")}`;
-		// found → injected (some may be dropped as already-seen this session).
-		return `${head} ${dim(`· found ${info.found} → ${info.injected}`)}`;
+		if (!info.queried) return `↙ skipped (${trunc(info.reason, 30)})`;
+		// The outcome comes BEFORE the query so that when the line budget bites it
+		// eats the query text — found→injected is the part that says whether memory
+		// actually contributed anything.
+		const outcome =
+			info.op === "reflect"
+				? info.injected > 0
+					? "answered"
+					: "no answer"
+				: info.found === 0
+					? "nothing found"
+					: `${info.found}→${info.injected}`;
+		return `↙ ${info.op} · ${outcome} · ${trunc(info.query || "(empty)", 40)}`;
 	}
 
 	// --- memorize (write) ---------------------------------------------------
@@ -192,7 +220,7 @@ export class HindsightStatus {
 		this.memo.phase = "collecting";
 		this.memo.frag = frag;
 		this.memo.reason = reason;
-		this.lastAction = this.c("dim", `↗ ${reason} → memory`);
+		this.lastAction = { text: `↗ ${reason} → memory`, tone: "dim" };
 		this.render();
 	}
 	memoExtracting(): void {
@@ -208,18 +236,18 @@ export class HindsightStatus {
 		this.memo.lastDocs = documents;
 		this.memo.lastLines = lines;
 		this.memo.session += 1;
-		this.lastAction = this.c("dim", `↗ ${this.memoLast()}`);
+		this.lastAction = { text: `↗ stored ${this.memoLast()}`, tone: "dim" };
 		this.render();
 	}
 	memoBlocked(): void {
 		this.memo.phase = "blocked";
-		this.lastAction = this.c("dim", "↗ nothing new to store");
+		this.lastAction = { text: "↗ nothing new to store", tone: "dim" };
 		this.render();
 	}
 	memoError(msg: string): void {
 		this.memo.phase = "error";
 		this.memo.detail = msg;
-		this.lastAction = `${this.c("error", "↗!")} ${this.c("dim", trunc(msg, 60))}`;
+		this.lastAction = { text: `↗! ${msg}`, tone: "error" };
 		this.render();
 	}
 
@@ -244,71 +272,79 @@ export class HindsightStatus {
 		}
 	}
 
+	/** Bank size, compact: the widget has one line to spend on everything. */
 	private counts(): string {
 		return this.bank.documents >= 0
-			? `${this.bank.documents} docs · ${this.bank.facts} facts`
-			: "— docs · — facts";
+			? `${this.bank.documents}d ${this.bank.facts}f`
+			: "—d —f";
 	}
 
 	private memoLast(): string {
 		return `${this.memo.lastDocs} doc${this.memo.lastDocs === 1 ? "" : "s"} · ${this.memo.lastLines} lines`;
 	}
 
-	/** The label shown while memory is actively working, or undefined when idle. */
-	private busyLabel(): string | undefined {
-		if (this.recall.active) return "waiting for bank…";
-		if (
+	private working(): boolean {
+		return (
+			this.recall.active ||
 			this.memo.phase === "collecting" ||
 			this.memo.phase === "extracting" ||
 			this.memo.phase === "writing"
-		)
-			return "storing…";
-		return undefined;
-	}
-
-	/**
-	 * Line 1 = bank connection + size only (dot · name · counts), plus a single
-	 * spinner label while working. All action/step detail lives on line 2, so this
-	 * line is calm and stable (no ↙0 / ↗— noise).
-	 */
-	private widgetLine(): string {
-		const brain = this.c("accent", "🧠");
-		const name = this.c("dim", this.bank.id || "(none)");
-		const counts = this.c("muted", this.counts());
-
-		const mode = this.autoMode();
-
-		if (this.bank.state === "error")
-			return `${brain} ${this.c("error", "●")} ${name} · ${mode} · ${this.c("error", trunc(this.bank.detail, 40))}`;
-		if (this.bank.state === "checking")
-			return `${brain} ${this.c("warning", "◐")} ${name} · ${mode} · ${this.c("dim", "checking…")}`;
-
-		const busy = this.busyLabel();
-		if (busy)
-			return `${brain} ${this.c("warning", "⟳")} ${name} · ${mode} · ${counts} · ${this.c("warning", busy)}`;
-		return `${brain} ${this.dot()} ${name} · ${mode} · ${counts}`;
+		);
 	}
 
 	/** Compact auto-mode cue: ↙ = recall, ↗ = retain. */
-	private autoMode(): string {
-		if (this.recall.off && this.memo.off) return this.c("warning", "auto off");
-		if (this.recall.off) return this.c("warning", "auto ↗");
-		if (this.memo.off) return this.c("warning", "auto ↙");
-		return this.c("dim", "auto ↙↗");
+	private autoMode(): { text: string; tone: ThemeColor } {
+		if (this.recall.off && this.memo.off)
+			return { text: "auto off", tone: "warning" };
+		if (this.recall.off) return { text: "↗", tone: "warning" };
+		if (this.memo.off) return { text: "↙", tone: "warning" };
+		return { text: "↙↗", tone: "dim" };
+	}
+
+	/**
+	 * The variable right-hand part: what the bank is doing right now, or its
+	 * complaint. Plain text — the caller styles it after truncating.
+	 */
+	private tail(): { text: string; tone: ThemeColor } {
+		if (this.bank.state === "error")
+			return { text: this.bank.detail || "bank unreachable", tone: "error" };
+		if (this.bank.state === "checking")
+			return { text: "checking…", tone: "dim" };
+		return this.lastAction;
+	}
+
+	/**
+	 * The whole widget: bank dot · name · auto cue · size · last action, on one
+	 * line. Everything is assembled in PLAIN text first so the budget arithmetic
+	 * is honest, and each fragment is coloured only after it has been cut.
+	 */
+	private widgetLine(): string {
+		const icon = this.working() ? this.c("warning", "⟳") : this.dot();
+		const name = trunc(this.bank.id || "(none)", 20);
+		const mode = this.autoMode();
+		const counts = this.bank.state === "ok" ? this.counts() : "";
+		// Every state icon (● ◐ ○ ⟳) is one column, so one stands in for all of
+		// them while measuring.
+		const headPlain = `🧠 ● ${name} ${mode.text}${counts ? ` ${counts}` : ""}`;
+		const head =
+			`${this.c("accent", "🧠")} ${icon} ${this.c("dim", name)}` +
+			` ${this.c(mode.tone, mode.text)}${counts ? ` ${this.c("muted", counts)}` : ""}`;
+
+		const tail = this.tail();
+		const text = trunc(tail.text, MAX_COLS - width(headPlain) - 3);
+		if (!text) return head;
+		return `${head} ${this.c("dim", "·")} ${this.c(tail.tone, text)}`;
 	}
 
 	private render(): void {
 		if (!this.ui?.setWidget) return;
-		// Line 2 is ALWAYS present (a neutral placeholder before any action), so the
-		// widget height never changes — that is what killed the "second line keeps
-		// coming back" flicker. It is a rolling history of the last memory action.
-		// lastAction is already fully styled by its setter (colors baked in), so we
-		// emit it verbatim — no dim re-wrap, no ANSI-unaware trunc that would corrupt
-		// the color codes. The strings are bounded by construction.
-		const line2 = this.lastAction || this.c("dim", "· ready");
-		this.ui.setWidget(WIDGET_ID, [this.widgetLine(), line2]);
-		// No footer strip: the 2-line widget is the single source of truth. Clear any
-		// strip a previous version may have left in the status bar.
+		// EXACTLY one line, always — that is what keeps the height stable and kills
+		// the "second line keeps coming back" flicker. The only remaining way the
+		// height could change is the host wrapping an over-long line, hence the
+		// MAX_COLS budget enforced in widgetLine().
+		this.ui.setWidget(WIDGET_ID, [this.widgetLine()]);
+		// No footer strip: the widget is the single source of truth. Clear any strip
+		// a previous version may have left in the status bar.
 		this.ui.setStatus?.(WIDGET_ID, undefined);
 	}
 }

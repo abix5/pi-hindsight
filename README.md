@@ -18,14 +18,16 @@ sessions and context compaction. It works in two directions:
   de-duplicates it against what the bank already knows, and stores only what is
   new — all in the background, without blocking the agent.
 
-A small status widget shows both contours live:
+A small status widget shows both contours live, on one line:
 
 ```
-🧠 ● pi-hindsight · auto ↙↗ · 16 docs · 153 facts
-↙ recall · db migration command · found→injected
+🧠 ● pi-hindsight ↙↗ 16d 153f · ↙ recall · 12→3 · db migration command
 ```
 
-Auto-mode markers: `↙` = recall, `↗` = retain, `auto off` = both disabled.
+Bank dot · bank id · auto-mode · bank size (`16d` documents, `153f` facts) ·
+the last memory action. Auto-mode markers: `↙` = recall, `↗` = retain,
+`auto off` = both disabled. On a recall, `12→3` is *found → injected* (the rest
+were already seen this session).
 
 ---
 
@@ -460,7 +462,7 @@ The extension also registers tools the agent (and subagents) can call directly:
 `hindsight_recall`, `hindsight_reflect`, `hindsight_retain`.
 
 Injected memory appears in the chat as a `🧠 recall` block; a memory write shows
-live on the widget's second line (see below).
+live on the widget (see below).
 
 ---
 
@@ -531,20 +533,23 @@ queries based on what it found, until it has enough or the query budget
 
 ## Widget legend
 
-Two fixed lines. Line 1 is the bank and its counts; line 2 is the live
-lifecycle of the current operation.
+One fixed line: `🧠` · bank dot · bank id · auto-mode · bank size · last action.
+The dot is `●` connected, `◐` checking, `○` not checked yet, `⟳` working; when
+the bank is unreachable its complaint replaces the size and the action.
+
+The action tail (truncated from the right in a narrow terminal):
 
 ```
-↙ recall · <query> · found→injected      memory found and injected this turn
-↙ recall · <query> · nothing found        looked, bank had nothing relevant
-↙ reflect · <query> · answered            bank composed a direct answer
-↙ skipped (reason)                         no lookup (meta-question / chit-chat)
+↙ waiting for bank… (clears on reply)   lookup in flight; Esc cannot cancel it
+↙ recall · 12→3 · <query>                found 12, injected 3 (rest already seen)
+↙ recall · nothing found · <query>       looked, bank had nothing relevant
+↙ reflect · answered · <query>           bank composed a direct answer
+↙ skipped (reason)                      no lookup (meta-question / chit-chat)
 
-building doc…                              memorize: extracting the report
-doc ✓ · dedup -2 · sending to bank…        2 known bullets dropped, storing rest
-doc ✓ · dedup ✓ · bank ✓ · +1              stored one new document
-doc ✓ · dedup ✓ · nothing new (all known)  everything was already remembered
-doc ✗ (nothing durable to store)           the slice had no reusable knowledge
+↗ <reason> → memory                     memorize started on that trigger
+↗ stored 1 doc · 9 lines                written to the bank
+↗ nothing new to store                  the slice had nothing durable / all known
+↗! <error>                              the write failed
 ```
 
 ---
