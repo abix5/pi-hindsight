@@ -68,6 +68,11 @@ export interface HindsightConfig {
 	factCategories?: Record<string, unknown>;
 	/** Recall filtering mode: model-selected indexes, or off. */
 	recallFilter: "model" | "off";
+	/**
+	 * Let the write path retire orphaned bank facts (deleted subjects, duplicates)
+	 * when the transcript proves they died. Off = the bank only ever grows.
+	 */
+	factInvalidation: boolean;
 	/** Recall search budget. */
 	recallBudget: Budget;
 	/** Feature flags. */
@@ -183,6 +188,7 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"bankReminderTurns",
 	"factCategories",
 	"recallFilter",
+	"factInvalidation",
 	"recallBudget",
 	"autoMemorize",
 	"autoRecall",
@@ -278,6 +284,7 @@ export function loadConfig(cwd: string): HindsightConfig {
 		bankReminderTurns: envInt("HINDSIGHT_BANK_REMINDER_TURNS", 10),
 		recallFilter:
 			process.env.HINDSIGHT_RECALL_FILTER === "off" ? "off" : "model",
+		factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", true),
 		recallBudget: (process.env.HINDSIGHT_RECALL_BUDGET as Budget) || "mid",
 		autoMemorize: envBool("HINDSIGHT_AUTO_MEMORIZE", true),
 		autoRecall: envBool("HINDSIGHT_AUTO_RECALL", true),

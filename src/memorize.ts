@@ -28,8 +28,14 @@ import {
 	buildMergePrompt,
 	buildSummarizePrompt,
 	buildVerifyPrompt,
+	DEDUP_INVALIDATE,
 } from "./prompts.ts";
-import { extractHits, normalizeLine } from "./recall-utils.ts";
+import {
+	extractHits,
+	normalizeLine,
+	parseInvalidations,
+	type RecallHit,
+} from "./recall-utils.ts";
 import {
 	computeDocId,
 	loadState,
@@ -50,6 +56,20 @@ import type { HindsightStatus } from "./ui.ts";
 
 /** Session entries as returned by the session manager. */
 type Entries = ReturnType<ExtensionContext["sessionManager"]["getEntries"]>;
+
+/**
+ * Chars of transcript that fit ONE model window at our input fraction (~4 chars
+ * per token). Shared by the verify pass and the invalidation pass: both must see
+ * the WHOLE delta or not run at all.
+ */
+function windowBudget(chain: ModelChain, cfg: HindsightConfig): number {
+	return Math.floor(
+		chain.primary.model.contextWindow * cfg.chunkInputFraction * 4,
+	);
+}
+
+/** Stored facts offered to the invalidation pass in one run. */
+const MAX_INVALIDATION_CANDIDATES = 60;
 
 export interface MemorizeDeps {
 	pi: ExtensionAPI;
@@ -494,9 +514,7 @@ export class Memorizer {
 
 		// verify: only when the delta fits one window (else trust distil+merge).
 		// Never zero-out on a flaky reply — keep the note if verify returns empty.
-		const verifyBudget = Math.floor(
-			chain.primary.model.contextWindow * cfg.chunkInputFraction * 4,
-		);
+		const verifyBudget = windowBudget(chain, cfg);
 		if (deltaText.length <= verifyBudget) {
 			try {
 				appendDebug(cwd, "memorize.verify.start", {
@@ -592,7 +610,7 @@ export class Memorizer {
 				});
 			}
 			const seen = new Set<string>();
-			const facts: string[] = [];
+			const facts: RecallHit[] = [];
 			// Cap the union so the dedup prompt stays bounded regardless of note size.
 			const maxFacts = 120;
 			for (const q of queries) {
@@ -614,16 +632,20 @@ export class Memorizer {
 					const key = normalizeLine(hit.text);
 					if (!key || seen.has(key)) continue;
 					seen.add(key);
-					facts.push(hit.text);
+					facts.push(hit);
 					if (facts.length >= maxFacts) break;
 				}
 			}
+			// The SAME recalled facts feed the third verdict. Run it before the prose
+			// dedup: a note that turns out fully duplicate returns early below, and
+			// that is exactly the run where the bank is most likely holding orphans.
+			await this.invalidateOrphans(ctx, chain, facts, deltaText);
 			if (facts.length === 0) {
 				// Bank knows nothing on this topic → nothing to dedup against. Keep the
 				// note unchanged (do NOT spend a model call).
 				appendDebug(cwd, "memorize.dedup.skip_empty", {});
 			} else {
-				const existing = facts.map((f) => `- ${f}`).join("\n");
+				const existing = facts.map((f) => `- ${f.text}`).join("\n");
 				const deduped = cleanProse(
 					await runModel(
 						ctx,
@@ -733,5 +755,90 @@ export class Memorizer {
 			/* counts are best-effort */
 		}
 		return "done";
+	}
+
+	/**
+	 * The DEDUP step's third verdict, carried out: retire bank facts this delta
+	 * proves are ORPHANS.
+	 *
+	 * Only orphans — a duplicate, or a fact about code that was deleted and will
+	 * never get a successor fact. A "was/now" pair is left alone: storing the new
+	 * fact is enough, and the bank's own consolidation reconciles the two.
+	 *
+	 * Every failure here is swallowed. Invalidation is housekeeping on top of the
+	 * write; a bank that refuses a PATCH, a model that returns junk, or an
+	 * unverifiable quote must all end with the memory still stored.
+	 */
+	private async invalidateOrphans(
+		ctx: ExtensionContext,
+		chain: ModelChain,
+		facts: RecallHit[],
+		deltaText: string,
+	): Promise<void> {
+		const { cfg } = this.deps;
+		const cwd = ctx.cwd ?? process.cwd();
+		if (!cfg.factInvalidation) return;
+		// Observations are derived and regenerate from their sources, so the server
+		// refuses to curate them (400). Offering one as a candidate would only waste
+		// a kill on a fact that comes straight back.
+		const candidates: Array<{ id: string; text: string }> = [];
+		for (const f of facts) {
+			if (!f.id || f.type === "observation") continue;
+			candidates.push({ id: f.id, text: f.text });
+			if (candidates.length >= MAX_INVALIDATION_CANDIDATES) break;
+		}
+		if (candidates.length === 0) return;
+		// The verdict is only as good as the evidence, and the evidence must be
+		// QUOTED from this transcript. A delta too big for one window would arrive
+		// truncated, and a quote from the missing half is unverifiable — so skip the
+		// pass entirely rather than judge on a fragment of a fragment.
+		const budget = windowBudget(chain, cfg);
+		if (deltaText.length > budget) {
+			appendDebug(cwd, "memorize.invalidate.skip_oversize", {
+				deltaChars: deltaText.length,
+				budget,
+			});
+			return;
+		}
+		let raw: string;
+		try {
+			const listed = candidates
+				.map((c) => `- id=${c.id} :: ${c.text}`)
+				.join("\n");
+			raw = await runModel(
+				ctx,
+				chain,
+				DEDUP_INVALIDATE,
+				`TRANSCRIPT:\n${deltaText}\n\nSTORED FACTS:\n${listed}`,
+				{ maxTokens: 512 },
+			);
+		} catch (err) {
+			appendDebug(cwd, "memorize.invalidate.model_error", {
+				error: (err as Error).message,
+			});
+			return;
+		}
+		const kills = parseInvalidations(raw, {
+			allowedIds: candidates.map((c) => c.id),
+			transcript: deltaText,
+		});
+		appendDebug(cwd, "memorize.invalidate.verdict", {
+			candidates: candidates.length,
+			output: raw,
+			kills: kills.length,
+		});
+		for (const kill of kills) {
+			try {
+				// The quote IS the reason: the server stores it as invalidation_reason,
+				// so every kill stays auditable next to the fact it retired.
+				await this.deps.client.invalidate(kill.id, kill.quote, ctx.signal);
+				appendDebug(cwd, "memorize.invalidate.done", { id: kill.id });
+			} catch (err) {
+				appendDebug(cwd, "memorize.invalidate.error", {
+					id: kill.id,
+					error: (err as Error).message,
+				});
+			}
+		}
 	}
 }

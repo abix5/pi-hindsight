@@ -300,6 +300,7 @@ Then each project you want memory in just declares its bank:
 | `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
 | `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set in the `/mem` Settings tab) |
 | `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (per-query LLM judge scores hits and drops junk) or `off` |
+| `factInvalidation` | `HINDSIGHT_FACT_INVALIDATION` | `true` | Let the write path retire orphaned bank facts, quote required (see below) |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
 | `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent-context budget for query building (tool output excluded) |
 | `taskDetect` | `HINDSIGHT_TASK_DETECT` | `true` | Run the task-change detector and the deep pass it triggers (see below) |
@@ -370,6 +371,40 @@ and a boundary already injects a visible briefing that reminds the model by
 itself. Nothing is injected when the project has no declared bank or auto-recall
 is off — a reminder about a bank that is not there is pure noise. Tune the
 interval with `bankReminderTurns`, or set `bankReminder` to `false`.
+
+### Letting a fact die
+
+A memory bank that only ever grows eventually asserts things that stopped being
+true. Measured on this project's own bank: a fifth of its facts described code
+that had been deleted, and not one fact in its whole history had ever been
+retired. The per-query judge cannot save you from that — it scores *relevance*,
+and a fact about the thing you just deleted is perfectly on topic.
+
+So the write path may retire a fact, under two rules.
+
+**Only orphans.** A "was/now" pair — it worked, then it was removed — needs
+nothing: storing the new fact is enough and the bank's own consolidation
+reconciles the two. What consolidation can never fix is an *orphan*: a duplicate,
+or a fact about deleted code that will never get a successor fact (a removed file
+gets no "the file is now X").
+
+**Only with evidence.** The step sees ONE delta chunk, not the whole project, so
+a fact is retired only when the model returns a sentence copied verbatim from the
+transcript showing the subject died — and that quote is then re-checked against
+the transcript **in code**. No quote, or a quote that is not actually there, and
+the fact survives. The quote is sent as the invalidation reason, so every kill
+stays auditable next to the fact it retired. Invalidation is reversible and the
+row stays in the bank.
+
+Failure here never costs you the write: a refused PATCH, a junk verdict or a
+model outage all end with the memory stored. Observations are skipped (they are
+derived and regenerate), and so is a delta too large to fit one model window,
+since a truncated transcript cannot verify a quote. Set `factInvalidation` to
+`false` to make the bank append-only again.
+
+There is deliberately no bank-cleanup command: the mechanism handles new writes
+and the backlog clears itself as work proceeds. Note that reprocessing a document
+resets the curation of every fact it produced.
 
 ### Turning the automatic contours off
 
