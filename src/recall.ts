@@ -242,7 +242,7 @@ export async function runRecall(
 			ctx,
 			chain,
 			QUERY_BUILDER,
-			`LATEST USER REQUEST:\n${prompt}\n\nRECENT CONTEXT:\n${recentContext(ctx, cfg.recallContextTokens)}\n\nMAX QUERIES: ${eff.queries}`,
+			`LATEST USER REQUEST:\n${prompt}\n\nRECENT CONTEXT:\n${recentContext(ctx, cfg.recallContextTokens)}`,
 			{ maxTokens: 320, signal },
 		);
 		appendDebug(cwd, "recall.gate.raw", { output: gateRaw });
@@ -298,9 +298,13 @@ export async function runRecall(
 
 	const queryLabel = plan.queries.join(" | ");
 	const seen = seenInjectedFacts(ctx);
+	// The effort setting is the REAL ceiling, enforced here rather than announced to
+	// the model: naming a number in the prompt made it a target (8 of 12 real turns
+	// hit the stated maximum exactly). recallMaxQueries stays as the absolute safety
+	// bound on top, so neither setting can be escaped by a chatty query builder.
 	const cap = deep
-		? Math.max(1, cfg.deepRecallQueries)
-		: Math.max(1, cfg.recallMaxQueries);
+		? Math.max(1, Math.min(cfg.deepRecallQueries, cfg.recallMaxQueries))
+		: Math.max(1, Math.min(eff.queries, cfg.recallMaxQueries));
 	const maxLines = deep
 		? Math.max(1, cfg.deepRecallMaxLines)
 		: cfg.recallMaxLines;
