@@ -28,7 +28,6 @@ OUTPUT CONTRACT (hard):
 
 Allowed outputs:
 {"shouldQuery":true,"op":"recall","queries":["<q1>","<q2>"]}
-{"shouldQuery":true,"op":"reflect","queries":["<single standalone question>"]}
 {"shouldQuery":false,"queries":[],"reason":"<why not>"}
 
 Rules:
@@ -37,8 +36,7 @@ Rules:
 - A query is a SEARCH KEY for the bank, NOT a restatement of the user's message. NEVER translate, reword, or split the user's sentence into questions. Instead name the CONCRETE SUBJECTS the request is about: identifiers, file paths, function names, config keys, endpoints, commands, component names taken from the request AND from RECENT CONTEXT.
 - Each query must be short (roughly 3-12 words) and must contain at least one concrete subject, while staying broad enough to cover every aspect of that subject. A query that could have been written without reading the conversation ("how does the extension work", "known issues and limitations") is FORBIDDEN - drop it.
 - Resolve pronouns/ellipsis ("it", "this", "оно", "тут") into the real subject using RECENT CONTEXT.
-- "op" selects how to hit the bank. DEFAULT "recall": returns raw stored facts mixed into the assistant's answer.
-- Use "op":"reflect" ONLY for a direct self-contained factual question answered STRICTLY from stored knowledge ("what did we decide about X", "where does Z live"); then return a SINGLE query.
+- "op" is ALWAYS "recall": the bank returns raw stored facts, which are then judged and mixed into the assistant's answer. Never emit any other value.
 - shouldQuery=false is a LAST RESORT with ONE test: taking the message TOGETHER WITH the RECENT CONTEXT that precedes it, can you name a concrete subject to search for? If yes, you MUST query. Only when the answer is genuinely no - nothing in the message and nothing in the prior context yields a searchable subject - return false.
 - Message LENGTH is irrelevant to that test. A long, wordy message can still be unqueryable, and a two-word message can be perfectly queryable. Judge only whether a concrete subject can be named, never how much text there is.
 - A message that merely SOUNDS procedural ("let's check", "давай проверим", "fix it", "сделай") is queryable when the PRIOR context shows WHAT is being checked or fixed - query that subject.

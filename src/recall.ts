@@ -7,7 +7,6 @@ import { appendDebug } from "./log.ts";
 import { type ModelChain, runModel } from "./model.ts";
 import { DEEP_SYNTHESIS, QUERY_BUILDER, RECALL_JUDGE } from "./prompts.ts";
 import {
-	directAnswer,
 	extractHits,
 	heuristicQueries,
 	normalizeLine,
@@ -305,41 +304,6 @@ export async function runRecall(
 	const maxLines = deep
 		? Math.max(1, cfg.deepRecallMaxLines)
 		: cfg.recallMaxLines;
-
-	if (plan.op === "reflect") {
-		// reflect composes a single answer from the bank's own context.
-		const q = plan.queries[0];
-		appendDebug(cwd, "recall.reflect.start", { query: q });
-		const res = await client.reflect(q, signal);
-		appendDebug(cwd, "recall.reflect.done", { response: res });
-		const answer = directAnswer(res);
-		if (answer)
-			return {
-				...emptyRecall(),
-				found: 1,
-				injected: 1,
-				text: answer,
-				query: q,
-				operation: "reflect",
-				queried: true,
-				reason: "bank reflected",
-			};
-		const hits = dedupeHits(extractHits(res)).filter(
-			(h) => !seen.has(normalizeLine(h.text)),
-		);
-		const kept = hits.slice(0, cfg.recallMaxLines);
-		return {
-			...emptyRecall(),
-			found: hits.length,
-			injected: kept.length,
-			text: kept.map((h) => `- ${h.text}`).join("\n"),
-			query: q,
-			operation: "reflect",
-			queried: true,
-			reason: kept.length ? "bank recalled facts" : "bank returned no facts",
-			rawHits: hits.map((h) => h.text),
-		};
-	}
 
 	// Each query is an independent recall: its own bank call and its own verdict,
 	// all in flight at once. Merging only afterwards is what lets a junk query be

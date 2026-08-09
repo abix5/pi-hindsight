@@ -131,7 +131,11 @@ export function parseQueryPlan(raw: string): QueryPlan {
 		];
 		return {
 			shouldQuery: obj.shouldQuery === true && queries.length > 0,
-			op: obj.op === "reflect" ? "reflect" : "recall",
+			// The automatic contour NEVER reflects: a diagnosed reflect takes tens of
+			// seconds even on a 10-fact bank, so it would burn the recall ceiling on the
+			// hot path and return nothing. The deliberate `hindsight_reflect` tool is
+			// the only path to reflect. A stray "reflect" from the model is coerced.
+			op: "recall",
 			queries,
 			reason: typeof obj.reason === "string" ? obj.reason.trim() : undefined,
 		};
@@ -260,15 +264,6 @@ function hitText(item: unknown): string {
 	return (
 		(it.content as string) ?? (it.text as string) ?? (it.memory as string) ?? ""
 	);
-}
-
-export function directAnswer(res: unknown): string {
-	if (typeof res === "string") return res.trim();
-	if (!res || typeof res !== "object") return "";
-	const obj = res as Record<string, unknown>;
-	if (Array.isArray(obj.memories ?? obj.results ?? obj.items ?? obj.hits))
-		return "";
-	return ((obj.answer as string) ?? (obj.text as string) ?? "").trim();
 }
 
 export function extractHits(res: unknown): RecallHit[] {
