@@ -6,6 +6,7 @@
  *   GET  /banks                           -> list banks
  *   POST /banks/{bank}/memories           -> retain (store memory items)
  *   POST /banks/{bank}/memories/recall    -> recall (search)
+ *   PATCH /banks/{bank}/memories/{id}     -> curate (edit / invalidate / restore)
  *   POST /banks/{bank}/reflect            -> reflect (synthesis)
  *
  * No auth header is sent (local instance).
@@ -230,6 +231,42 @@ export class HindsightClient {
 			);
 		} catch (err) {
 			if (err instanceof HindsightError && err.status === 404) return;
+			throw err;
+		}
+	}
+
+	/**
+	 * PATCH /v1/{ns}/banks/{bank}/memories/{id} — soft-retire ONE fact.
+	 *
+	 * Request shape verified against the live server (Hindsight 0.9.0,
+	 * `UpdateMemoryRequest`): the body field is `reason`, NOT `invalidation_reason`
+	 * — the latter is what the row reads back as in `memories/list`.
+	 *
+	 * An invalidated fact leaves recall, consolidation and the graph but stays in
+	 * the bank for audit, and can be restored. Two rejections are expected and
+	 * swallowed as no-ops rather than failing the write that triggered them:
+	 *   404 — the memory is already gone;
+	 *   400 — the id is an OBSERVATION. Observations are derived and regenerate
+	 *         from their sources, so the server refuses to curate them.
+	 */
+	async invalidate(
+		id: string,
+		reason: string,
+		signal?: AbortSignal,
+	): Promise<void> {
+		try {
+			await this.request(
+				"PATCH",
+				`${this.bankBase()}/memories/${encodeURIComponent(id)}`,
+				{ state: "invalidated", reason },
+				signal,
+			);
+		} catch (err) {
+			if (
+				err instanceof HindsightError &&
+				(err.status === 404 || err.status === 400)
+			)
+				return;
 			throw err;
 		}
 	}

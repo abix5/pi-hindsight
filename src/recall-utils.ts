@@ -2,6 +2,18 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 export interface RecallHit {
 	text: string;
+	/**
+	 * Bank memory id. Recall returns one per hit; a prose/string response has
+	 * none. Required to curate the fact (PATCH memories/{id}) — the recall path
+	 * itself never reads it.
+	 */
+	id?: string;
+	/**
+	 * Fact type as the bank reports it (`world` | `experience` | `observation`).
+	 * Only world/experience facts can be curated: a PATCH on an observation is
+	 * rejected with 400 because observations are derived and regenerate.
+	 */
+	type?: string;
 }
 
 export function normalizeLine(s: string): string {
@@ -266,6 +278,13 @@ function hitText(item: unknown): string {
 	);
 }
 
+/** Read a string field off a hit object, ignoring anything non-string. */
+function hitField(item: unknown, key: string): string | undefined {
+	if (typeof item !== "object" || item === null) return undefined;
+	const v = (item as Record<string, unknown>)[key];
+	return typeof v === "string" && v.trim() ? v.trim() : undefined;
+}
+
 export function extractHits(res: unknown): RecallHit[] {
 	if (!res) return [];
 	if (typeof res === "string")
@@ -278,11 +297,78 @@ export function extractHits(res: unknown): RecallHit[] {
 		(obj.hits as unknown[]);
 	if (Array.isArray(list))
 		return list
-			.map((item) => ({ text: hitText(item).trim() }))
+			.map((item) => ({
+				text: hitText(item).trim(),
+				id: hitField(item, "id"),
+				// recall calls it `type`, memories/list calls it `fact_type`.
+				type: hitField(item, "type") ?? hitField(item, "fact_type"),
+			}))
 			.filter((h) => h.text);
 	if (typeof obj.text === "string") return [{ text: obj.text.trim() }];
 	if (typeof obj.answer === "string") return [{ text: obj.answer.trim() }];
 	return [];
+}
+
+/**
+ * One fact the DEDUP step ruled an ORPHAN: its subject died and no replacement
+ * fact will ever be stored, so consolidation cannot reconcile it.
+ */
+export interface Invalidation {
+	/** Bank memory id to retire. */
+	id: string;
+	/** Verbatim transcript sentence proving the subject died → `invalidation_reason`. */
+	quote: string;
+}
+
+/** Collapse whitespace/case so a quote can be matched against the transcript. */
+function loose(s: string): string {
+	return s.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Parse the DEDUP step's extended verdict list.
+ *
+ * The step's three verdicts are `new` / `duplicate` / `contradicts:<id>`; the
+ * first two are already expressed by the surviving prose note, so only
+ * `contradicts` carries an action here.
+ *
+ * Every rejection below is a SILENT-LOSS guard. The step sees ONE delta chunk,
+ * not the whole picture, so a model that merely reads a fact discussed in the
+ * past tense would happily call it dead. Killing a fact is not undone by the
+ * next run, so each candidate must clear all of:
+ *   - a known id (the model cannot invent a victim),
+ *   - a non-empty quote (the kill is auditable afterwards),
+ *   - a quote that ACTUALLY OCCURS in the transcript (checked here, in code,
+ *     because a model asked for evidence will otherwise paraphrase one).
+ */
+export function parseInvalidations(
+	raw: string,
+	opts: { allowedIds: Iterable<string>; transcript: string },
+): Invalidation[] {
+	const allowed = new Set(opts.allowedIds);
+	const haystack = loose(opts.transcript);
+	let list: unknown;
+	try {
+		const obj = JSON.parse(raw.trim()) as { verdicts?: unknown };
+		list = obj?.verdicts;
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(list)) return [];
+	const out: Invalidation[] = [];
+	const taken = new Set<string>();
+	for (const entry of list) {
+		const e = entry as { verdict?: unknown; id?: unknown; quote?: unknown };
+		if (e?.verdict !== "contradicts") continue;
+		const id = typeof e.id === "string" ? e.id.trim() : "";
+		if (!id || !allowed.has(id) || taken.has(id)) continue;
+		const quote = typeof e.quote === "string" ? e.quote.trim() : "";
+		if (!quote) continue;
+		if (!haystack.includes(loose(quote))) continue;
+		taken.add(id);
+		out.push({ id, quote });
+	}
+	return out;
 }
 
 export function seenInjectedFacts(ctx: ExtensionContext): Set<string> {
