@@ -307,6 +307,8 @@ Then each project you want memory in just declares its bank:
 | `taskTitleTail` | `HINDSIGHT_TASK_TITLE_TAIL` | `8` | Past task titles kept in the detector prompt so a RETURN is not read as a new task |
 | `deepRecallQueries` | `HINDSIGHT_DEEP_RECALL_QUERIES` | `5` | Bank queries the deep pass may run |
 | `deepRecallMaxLines` | `HINDSIGHT_DEEP_RECALL_MAX_LINES` | `24` | Judged facts fed to the deep pass synthesis |
+| `bankReminder` | `HINDSIGHT_BANK_REMINDER` | `true` | Inject the short "the bank exists, ask it" nudge (see below) |
+| `bankReminderTurns` | `HINDSIGHT_BANK_REMINDER_TURNS` | `10` | Turns between nudges (the first one rides on the first turn of a session) |
 | `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim) |
 | `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
 | `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
@@ -347,6 +349,27 @@ available for the agent to call deliberately.
 The detector never lengthens an ordinary turn: it runs concurrently with the
 ordinary recall, and its verdict only decides which result is used. Set
 `taskDetect` to `false` to go back to plain per-turn recall.
+
+### The bank reminder
+
+The automatic contour catches topic changes on its own, but the model is the
+only party that reads the whole conversation — it knows when *it* is short of
+context. It just forgets the `hindsight_*` tools exist after a dozen turns, and
+a forgotten tool is a dead tool.
+
+So on the first turn of a session, and every `bankReminderTurns` turns after
+that, one short block is injected: the bank's name and size, and a pointer to
+`hindsight_recall` / `hindsight_reflect` / `hindsight_retain`. It is labelled as
+plugin output so it reads neither as a user instruction nor as recalled facts,
+and it costs nothing — no model call, no bank call, just the counters the widget
+already polls.
+
+The counter is a blind modulo, deliberately **not** reset at a task boundary:
+forgetting tracks turns since the tools were last mentioned, not task identity,
+and a boundary already injects a visible briefing that reminds the model by
+itself. Nothing is injected when the project has no declared bank or auto-recall
+is off — a reminder about a bank that is not there is pure noise. Tune the
+interval with `bankReminderTurns`, or set `bankReminder` to `false`.
 
 ### Turning the automatic contours off
 
