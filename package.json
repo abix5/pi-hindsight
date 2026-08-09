@@ -19,6 +19,7 @@
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
+    "test": "node --experimental-transform-types --test tests/*.test.ts",
     "prepack": "npm run typecheck"
   },
   "publishConfig": {
