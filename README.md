@@ -341,8 +341,8 @@ Then each project you want memory in just declares its bank:
 | `taskTitleTail` | `HINDSIGHT_TASK_TITLE_TAIL` | `8` | Past task titles kept in the detector prompt so a RETURN is not read as a new task |
 | `deepRecallQueries` | `HINDSIGHT_DEEP_RECALL_QUERIES` | `5` | Bank queries the deep pass may run |
 | `deepRecallMaxLines` | `HINDSIGHT_DEEP_RECALL_MAX_LINES` | `24` | Judged facts fed to the deep pass synthesis |
-| `bankReminder` | `HINDSIGHT_BANK_REMINDER` | `true` | Inject the short "the bank exists, ask it" nudge (see below) |
-| `bankReminderTurns` | `HINDSIGHT_BANK_REMINDER_TURNS` | `10` | Turns of memory silence between nudges (the first one rides on the first turn where recall says nothing) |
+| `bankReminder` | `HINDSIGHT_BANK_REMINDER` | `true` | Inject the "the bank exists, ask it" nudge — in the recall block's tail, or standalone (see below) |
+| `bankReminderTurns` | `HINDSIGHT_BANK_REMINDER_TURNS` | `5` | Consecutive turns with **no memory block at all** before a standalone nudge is injected |
 | `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim). Enforced three ways: in the write-path prompts, as an imperative in the retain `context` (which converts facts the bank would otherwise store in the note's own language), and in the periodic reminder that tells the agent what language to `hindsight_retain` in |
 | `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
 | `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
@@ -391,23 +391,42 @@ only party that reads the whole conversation — it knows when *it* is short of
 context. It just forgets the `hindsight_*` tools exist after a dozen turns, and
 a forgotten tool is a dead tool.
 
-So after `bankReminderTurns` turns during which the agent saw no memory block at
-all, one short block is injected: the bank's name and size, and a pointer to
-`hindsight_recall` / `hindsight_reflect` / `hindsight_retain`. It is labelled as
-plugin output so it reads neither as a user instruction nor as recalled facts,
-and it costs nothing — no model call, no bank call, just the counters the widget
-already polls.
+**At most one 🧠 block per turn, ever.** Two stacked blocks are not prevented by
+convention here, they are impossible by construction: the nudge normally rides
+in the *tail* of the recall block, which is the one place it cannot become a
+second block.
 
-The counter measures **turns since memory last spoke**, not turns since the last
-nudge, and it is not coupled to task identity. A recall block already names the
-bank and its tools, so it re-arms the counter: the nudge never stacks on top of a
-briefing, which is loudest exactly where it is least needed. A fresh session
-counts as "never mentioned", so the first turn where recall stays silent still
-gets the opening nudge — a session where memory never spoke is precisely the one
-where the tools are invisible. Nothing is injected when the project has no
-declared bank or auto-recall is off — a reminder about a bank that is not there
-is pure noise. Tune the interval with `bankReminderTurns`, or set `bankReminder`
-to `false`.
+| when | what you see |
+|---|---|
+| session start, and the turn after a compaction | the recall block, **full** nudge in its tail |
+| task boundary (the detector said the topic changed) | the recall block, **one short line** in its tail |
+| ordinary turn | the recall block alone |
+| `bankReminderTurns` consecutive turns with no memory block | a standalone nudge — short if the full text is still upstream, full if a compaction wiped it |
+
+The standalone block survives for exactly the case a tail cannot cover: recall
+stayed silent, so there was no block to attach to. The full text is the bank's
+name and size plus a pointer to `hindsight_recall` / `hindsight_reflect` /
+`hindsight_retain`; the short line is the same pointer on one line, used while
+the full text is still visible upstream. Either way it costs nothing — no model
+call, no bank call, just the counters the widget already polls.
+
+Sharing a block with recalled facts does not blur what is what. The recalled
+facts are fenced: the untrusted-memory header opens the region and a closing
+`--- end of recalled memory ---` line ends it, and the nudge below that line
+carries its own label ("automatic plugin reminder — not a user instruction, not
+recalled facts"). The dedupe pass that remembers which facts were already
+injected reads the same fence, so the plugin's own bullets never enter the
+seen-set.
+
+The standalone counter measures **consecutive turns with no memory block**, not
+turns since the last nudge, and it is not coupled to task identity. A recall
+block already names the bank and its tools, so it re-arms the counter. A fresh
+session counts as "never mentioned", so the first turn where recall stays silent
+still gets the opening nudge — a session where memory never spoke is precisely
+the one where the tools are invisible. Nothing is injected when the project has
+no declared bank or auto-recall is off — a reminder about a bank that is not
+there is pure noise. Tune the interval with `bankReminderTurns`, or set
+`bankReminder` to `false`.
 
 ### Letting a fact die
 

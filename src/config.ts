@@ -57,9 +57,9 @@ export interface HindsightConfig {
 	deepRecallQueries: number;
 	/** Judged facts fed to the deep pass synthesis (wider than an ordinary turn's inject cap). */
 	deepRecallMaxLines: number;
-	/** Inject the short "the bank exists, ask it" reminder after N turns with no memory block. */
+	/** Inject the bank nudge: in the recall block's tail, or standalone after N silent turns. */
 	bankReminder: boolean;
-	/** Turns of memory silence between reminders. Too small pollutes context, too large and the tools are forgotten. */
+	/** Consecutive turns with NO memory block before a STANDALONE nudge is injected. */
 	bankReminderTurns: number;
 	/**
 	 * Fact-category configurator for the memorize contour. Loose shape:
@@ -281,7 +281,7 @@ export function loadConfig(cwd: string): HindsightConfig {
 		deepRecallQueries: envInt("HINDSIGHT_DEEP_RECALL_QUERIES", 5),
 		deepRecallMaxLines: envInt("HINDSIGHT_DEEP_RECALL_MAX_LINES", 24),
 		bankReminder: envBool("HINDSIGHT_BANK_REMINDER", true),
-		bankReminderTurns: envInt("HINDSIGHT_BANK_REMINDER_TURNS", 10),
+		bankReminderTurns: envInt("HINDSIGHT_BANK_REMINDER_TURNS", 5),
 		recallFilter:
 			process.env.HINDSIGHT_RECALL_FILTER === "off" ? "off" : "model",
 		factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", true),

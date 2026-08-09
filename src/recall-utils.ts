@@ -380,10 +380,14 @@ export function seenInjectedFacts(ctx: ExtensionContext): Set<string> {
 		if (!text.includes("mem-recall")) continue;
 		// Record ONLY the bullets UNDER the "Injected facts" marker. The trace lines
 		// above it are ALSO bullets ("- Bank query:", "- Found in bank:") but are not
-		// facts, so anchoring on the marker keeps them out of the seen-set.
+		// facts, so anchoring on the marker keeps them out of the seen-set. The block
+		// may also carry a plugin reminder in its tail, below the closing marker —
+		// its bullets are plugin text, not bank text, so the region ends there.
 		const marker = text.indexOf("Injected facts");
 		if (marker === -1) continue;
-		for (const raw of text.slice(marker).split(/\\n|\n/)) {
+		const end = text.indexOf("end of recalled memory", marker);
+		const region = end === -1 ? text.slice(marker) : text.slice(marker, end);
+		for (const raw of region.split(/\\n|\n/)) {
 			const m = /[-*•]\s+(.+)$/.exec(raw.replace(/\\"/g, '"'));
 			if (!m) continue;
 			// Strip trailing JSON artifacts (the stringified entry's closing quote/
