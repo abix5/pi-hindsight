@@ -50,6 +50,7 @@ check: ## Typecheck + run the self-tests
 	bun scripts/fact-invalidation.test.ts
 	bun scripts/widget.test.ts
 	bun scripts/write-hygiene.test.ts
+	bun scripts/delta-window.test.ts
 	npm test
 
 publish: check ## Typecheck, then publish to npm (needs auth)

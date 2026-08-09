@@ -402,20 +402,38 @@ export class Memorizer {
 			deltaEntries: delta.length,
 			deltaChars: deltaText.length,
 		});
-		// Nothing new since the last flush. Make it VISIBLE (a manual flush that
-		// silently does nothing looks broken) and tell the user how to force a
-		// full re-collect. Use /mem-save all to ignore the watermark.
+		// Nothing to write in THIS window — but the two reasons are different and the
+		// advice differs with them, so tell them apart. A shutdown/manual flush runs to
+		// the very end of the session, which pushes the watermark past where a later
+		// compaction's boundary sits (compaction always keeps a live tail). The window
+		// then collapses to nothing even though the conversation has moved on. That is
+		// not an idle session, and "/mem-save all" is actively wrong advice for it:
+		// re-collecting everything would delete and rewrite documents that are fine.
 		if (!deltaText.trim()) {
+			const pending = boundaryId
+				? getDeltaEntries(entries, watermark, undefined).length
+				: 0;
+			const blocked = pending > 0;
+			const plural = pending === 1 ? "y" : "ies";
 			this.deps.status.memoBlocked();
+			appendDebug(cwd, "memorize.delta.empty", {
+				reason,
+				cause: blocked ? "watermark_past_boundary" : "no_new_entries",
+				pending,
+			});
 			appendLog(cwd, cfg.logPath, {
 				type: "retain",
-				reason: `${reason}: no delta`,
+				reason: blocked
+					? `${reason}: watermark past boundary, ${pending} entries pending`
+					: `${reason}: no delta`,
 				documents: 0,
 				lines: 0,
 			});
 			this.notify(
 				ctx,
-				"nothing new since last flush — memory is up to date (use /mem-save all to re-collect the whole session)",
+				blocked
+					? `already saved through the live tail — ${pending} newer entr${plural} stay in context and reach the bank once compaction passes them (nothing is lost, no action needed)`
+					: "nothing new since last flush — memory is up to date (use /mem-save all to re-collect the whole session)",
 			);
 			return;
 		}
