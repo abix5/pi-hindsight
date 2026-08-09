@@ -125,6 +125,42 @@ check(
 	[],
 );
 
+// C1 — the reviewer's probe, verbatim. A single letter occurs in EVERY
+// transcript, so "the quote is a substring" was not a guard at all: one letter
+// retired a fact, and nothing in this package can undo a kill.
+check(
+	"a one-letter quote cannot retire a fact",
+	parseInvalidations(
+		'{"verdicts":[{"verdict":"contradicts","id":"f1","quote":"e"}]}',
+		{ allowedIds: ["f1"], transcript: "USER: please review the recall path" },
+	),
+	[],
+);
+
+// The same failure mode with the word a small model actually emits under a JSON
+// contract. It occurs verbatim in the transcript and still must not be evidence.
+check(
+	"a single word that happens to occur is not evidence",
+	kills('{"verdicts":[{"verdict":"contradicts","id":"fact-review","quote":"deleted"}]}'),
+	[],
+);
+
+check(
+	"a short phrase below the sentence floor is not evidence",
+	kills('{"verdicts":[{"verdict":"contradicts","id":"fact-review","quote":"I deleted"}]}'),
+	[],
+);
+
+// ...and the floor must not reject REAL evidence: one plain sentence, the
+// shortest shape a human would actually write, still kills.
+check(
+	"a legitimate one-sentence quote still retires the fact",
+	kills(
+		'{"verdicts":[{"verdict":"contradicts","id":"fact-port","quote":"port 7788 moved to 9100."}]}',
+	),
+	[{ id: "fact-port", quote: "port 7788 moved to 9100." }],
+);
+
 // The whole point of the safety catch: a plausible-sounding quote that is not in
 // the transcript is a fabrication, and fabricated evidence must not kill a fact.
 check(

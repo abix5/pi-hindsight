@@ -41,8 +41,6 @@ export interface HindsightConfig {
 	recallMaxLines: number;
 	/** Recent session context budget for building a bank query. */
 	recallContextTokens: number;
-	/** Recall operation: raw facts or Hindsight-generated reflection. */
-	recallOperation: "recall" | "reflect";
 	/** Ceiling on how many separate bank queries one recall may build (2/3/5). */
 	recallEffort: RecallEffort;
 	/** Hard safety bound on bank queries per recall, applied on top of the effort. */
@@ -176,7 +174,6 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"recallMaxTokens",
 	"recallMaxLines",
 	"recallContextTokens",
-	"recallOperation",
 	"recallEffort",
 	"recallMaxQueries",
 	"taskDetect",
@@ -269,10 +266,6 @@ export function loadConfig(cwd: string): HindsightConfig {
 		recallMaxTokens: envInt("HINDSIGHT_RECALL_MAX_TOKENS", 2048),
 		recallMaxLines: envInt("HINDSIGHT_RECALL_MAX_LINES", 8),
 		recallContextTokens: envInt("HINDSIGHT_RECALL_CONTEXT_TOKENS", 5000),
-		recallOperation:
-			process.env.HINDSIGHT_RECALL_OPERATION === "reflect"
-				? "reflect"
-				: "recall",
 		recallEffort: parseEffort(process.env.HINDSIGHT_RECALL_EFFORT, "normal"),
 		recallMaxQueries: envInt("HINDSIGHT_RECALL_MAX_QUERIES", 8),
 		taskDetect: envBool("HINDSIGHT_TASK_DETECT", true),

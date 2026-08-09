@@ -9,10 +9,14 @@
  * repeat file names — they write "продолжай" and "это не сработает". Only a
  * model reading the thread can tell continuation from a new subject.
  *
- * Two properties keep this affordable:
+ * Three properties keep this affordable:
  *   - the history holds a DIGEST of each answer (first sentence + touched
  *     files), never the answer itself — the full text would multiply the cached
  *     prefix by an order of magnitude, and that prefix is the whole cost;
+ *   - the user's message is CAPPED too (see USER_CHARS). `event.prompt` is the
+ *     EXPANDED text, so one `@file` reference would otherwise inline a whole
+ *     file into the prefix — ×12 turns, re-sent every turn, and written into a
+ *     long-retention cache;
  *   - on "changed" the history is dropped, so the retained slice always IS the
  *     description of the task currently in progress.
  */
@@ -45,10 +49,24 @@ export interface TaskState {
 	compactions: number;
 	/** False until the first turn of this session has been handled. */
 	started: boolean;
+	/**
+	 * Normalized keys of facts already injected in this session, carried in
+	 * extension memory because the transcript cannot show them all: a deep pass
+	 * injects a synthesized PROSE briefing, which has no bullets for
+	 * `seenInjectedFacts` to read back. Cleared on a compaction (the transcript,
+	 * and with it everything injected, is gone) and on a session change.
+	 */
+	seenFacts: Set<string>;
 }
 
 export function newTaskState(): TaskState {
-	return { turns: [], pastTitles: [], compactions: 0, started: false };
+	return {
+		turns: [],
+		pastTitles: [],
+		compactions: 0,
+		started: false,
+		seenFacts: new Set(),
+	};
 }
 
 export interface TaskVerdict {
@@ -99,6 +117,14 @@ const EDIT_TOOLS = new Set([
 const SENTENCE_CHARS = 200;
 /** Max files named in one digest (a refactor can touch dozens). */
 const DIGEST_FILES = 6;
+/**
+ * Max chars of the user's message kept per turn. `event.prompt` is the EXPANDED
+ * prompt, so an `@file` reference arrives with the whole file inlined; uncapped,
+ * one such turn would sit in the detector prefix for the next twelve turns and
+ * in the long-retention cache. Head + tail, because the instruction is at one
+ * end or the other and the bulk in the middle is the part that is not signal.
+ */
+const USER_CHARS = 600;
 
 type LooseEntry = {
 	id?: string;
@@ -148,6 +174,15 @@ function firstSentence(text: string): string {
 		: cut;
 }
 
+/** Head + tail of an over-long message, so both ends of the instruction survive. */
+function clipUser(text: string): string {
+	const flat = text.trim();
+	if (flat.length <= USER_CHARS) return flat;
+	const head = Math.ceil(USER_CHARS * 0.7);
+	const tail = USER_CHARS - head;
+	return `${flat.slice(0, head)}\n…\n${flat.slice(-tail)}`;
+}
+
 /**
  * Append this turn to the detector's history.
  *
@@ -162,7 +197,7 @@ export function recordTurn(
 	cfg: HindsightConfig,
 ): void {
 	const head = digest ? `PREVIOUS ANSWER: ${digest}\n\n` : "";
-	state.turns.push({ user: `${head}USER: ${userText}` });
+	state.turns.push({ user: `${head}USER: ${clipUser(userText)}` });
 	const cap = Math.max(2, cfg.taskHistoryTurns);
 	if (state.turns.length > cap) state.turns.splice(0, state.turns.length - cap);
 }
@@ -171,6 +206,11 @@ export function recordTurn(
  * Close a turn: on "changed" the finished task's title joins the tail and the
  * history is dropped, so the next turn starts describing the NEW task from
  * scratch. That truncation is what keeps the cached prefix small.
+ *
+ * An INVALID reply is recorded as no verdict at all. Storing the raw text would
+ * replay junk as an assistant turn and few-shot-train the next call to produce
+ * more of it. The user turn then stays unanswered, which `renderHistory` folds
+ * into the next one rather than emitting two user messages in a row.
  */
 export function applyVerdict(
 	state: TaskState,
@@ -179,6 +219,7 @@ export function applyVerdict(
 	cfg: HindsightConfig,
 ): void {
 	if (!verdict.changed) {
+		if (!verdict.valid) return;
 		const last = state.turns[state.turns.length - 1];
 		if (last) last.verdict = raw.trim();
 		return;
@@ -201,9 +242,17 @@ export function applyVerdict(
  * The past-task tail and the current title ride on the FIRST user message
  * rather than the system prompt: they change only at a boundary (where the
  * history is dropped anyway), so the cached prefix survives every ordinary turn.
+ *
+ * Strict alternation is enforced here rather than assumed. A turn can end
+ * WITHOUT a verdict in two ways — an unparseable reply, or an error/abort that
+ * returns before `applyVerdict` — and consecutive user messages are a hard 400
+ * on a strict-alternation provider, which would kill boundary detection
+ * silently and permanently for the rest of the session. So unanswered user
+ * turns are merged into the next one; nothing is lost but the empty slot.
  */
 export function renderHistory(state: TaskState): ModelMessage[] {
 	const out: ModelMessage[] = [];
+	let pending: string[] = [];
 	for (const [i, turn] of state.turns.entries()) {
 		let text = turn.user;
 		if (i === 0) {
@@ -215,9 +264,13 @@ export function renderHistory(state: TaskState): ModelMessage[] {
 			if (state.title) header.push(`CURRENT TASK: ${state.title}`);
 			if (header.length) text = `${header.join("\n\n")}\n\n${text}`;
 		}
-		out.push({ role: "user", text });
-		if (turn.verdict) out.push({ role: "assistant", text: turn.verdict });
+		pending.push(text);
+		if (!turn.verdict) continue;
+		out.push({ role: "user", text: pending.join("\n\n") });
+		pending = [];
+		out.push({ role: "assistant", text: turn.verdict });
 	}
+	if (pending.length) out.push({ role: "user", text: pending.join("\n\n") });
 	// A trailing assistant turn would leave the model nothing to answer.
 	if (out[out.length - 1]?.role === "assistant") out.pop();
 	return out;

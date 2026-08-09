@@ -45,6 +45,7 @@ check: ## Typecheck + run the self-tests
 	bun scripts/mem-panel.test.ts
 	bun scripts/recall-judge.test.ts
 	bun scripts/task-detector.test.ts
+	bun scripts/turn-recall.test.ts
 	bun scripts/bank-reminder.test.ts
 	bun scripts/fact-invalidation.test.ts
 	bun scripts/widget.test.ts

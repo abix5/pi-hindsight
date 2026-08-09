@@ -13,7 +13,12 @@
  */
 
 import * as path from "node:path";
-import { type PendingDoc, loadPending, markDone } from "./review-queue.ts";
+import {
+	type PendingDoc,
+	loadPending,
+	markDone,
+	projectLanguage,
+} from "./review-queue.ts";
 import { retainContext, retainMetadata } from "./retain-hygiene.ts";
 
 const DOC_ID_RE = /^[\w-]+$/;
@@ -30,6 +35,12 @@ export interface ReviewDoc {
 	text: string;
 	createdAt: string;
 	factCount: number;
+	/**
+	 * Language of the bank this document belongs to — from the queue entry, which
+	 * recorded it in the ORIGIN project. "" only for entries written before the
+	 * field existed AND whose project no longer declares one.
+	 */
+	language: string;
 	/** True when the bank could not be reached for this entry. */
 	unreachable: boolean;
 }
@@ -87,6 +98,9 @@ async function hydrate(p: PendingDoc): Promise<ReviewDoc | undefined> {
 		text: "",
 		createdAt: "",
 		factCount: 0,
+		// Legacy entries carry no language: fall back to the origin project's own
+		// config rather than to the reviewing session's.
+		language: p.language || projectLanguage(p.project),
 		unreachable: false,
 	};
 	// Network/timeout: keep it pending but flag it, so the user is not silently

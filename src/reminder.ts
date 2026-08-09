@@ -18,9 +18,13 @@
  *
  * Forgetting is a function of turns since the tools were last MENTIONED, not of
  * task identity — so the counter is not reset on the task-detector's boundary.
- * But an injected recall block is itself a visible mention: it names the bank and
- * its tools in the same turn. So the counter measures CONSECUTIVE turns with NO
- * memory block, and a recall block re-arms it.
+ * An injected recall block re-arms the counter anyway, and deliberately: it does
+ * NOT name the tools (it carries a query trace and bank facts, never
+ * `hindsight_recall` / `hindsight_retain`), but it is a visible 🧠 block, and the
+ * one-block-per-turn invariant is worth more than a nudge that would have to
+ * become a second block to be delivered. So the counter measures CONSECUTIVE
+ * turns with NO memory block of any kind; when a recall block IS injected, the
+ * tail rides inside it and that is where the tools get named.
  *
  * A fresh session starts at "never mentioned", so the first turn on which recall
  * stays silent still gets the opening nudge: a session where memory never spoke

@@ -37,7 +37,6 @@ const cfg = {
 	autoRecall: true,
 	autoMemorize: true,
 	recallEffort: "normal",
-	recallOperation: "recall",
 	recallFilter: "model",
 	recallMaxLines: 8,
 	recallModelChain: [],
