@@ -132,8 +132,22 @@ export default function (pi: ExtensionAPI) {
 	let client: HindsightClient | undefined;
 	const getState = () => (cfg && client ? { cfg, client } : undefined);
 
+	// Mode guard: when pi opens THIS plugin's own dev checkout, the project's
+	// local `.pi/extensions/hindsight.ts` loads the working-tree source. If the
+	// published package is ALSO installed globally, both copies would load in the
+	// same process and fight over the widget. So the globally-installed copy
+	// stands down whenever a local dev loader is present — the dev source wins.
+	// (`make global` renames the loader away to force the published copy instead.)
+	//
+	// This runs BEFORE `registerFlag`: registering the same flag from two copies
+	// is itself a hard load error, so standing down after registration is too late.
+	if (isInstalledCopy() && localDevLoaderPresent(process.cwd())) {
+		return;
+	}
+
 	// `--mem-only-tools` (and the ephemeral-subagent case below) select TOOLS-ONLY
-	// mode. Registered first so the flag exists before anything reads it.
+	// mode. Read off argv rather than `pi.getFlag`, so registration order does not
+	// matter for the checks below.
 	pi.registerFlag("mem-only-tools", {
 		description:
 			"Memory: register the hindsight_* tools only — no widget, hooks, commands, timers, or automatic recall/retain",
@@ -157,16 +171,6 @@ export default function (pi: ExtensionAPI) {
 			/* getState stays undefined; tools then report "not initialized" */
 		}
 		registerTools(pi, getState);
-		return;
-	}
-
-	// Mode guard: when pi opens THIS plugin's own dev checkout, the project's
-	// local `.pi/extensions/hindsight.ts` loads the working-tree source. If the
-	// published package is ALSO installed globally, both copies would load in the
-	// same process and fight over the widget. So the globally-installed copy
-	// stands down whenever a local dev loader is present — the dev source wins.
-	// (`make global` renames the loader away to force the published copy instead.)
-	if (isInstalledCopy() && localDevLoaderPresent(process.cwd())) {
 		return;
 	}
 
