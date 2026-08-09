@@ -6,6 +6,14 @@ import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug } from "./log.ts";
 import { type ModelChain, runModel } from "./model.ts";
 import { DEEP_SYNTHESIS, QUERY_BUILDER, RECALL_JUDGE } from "./prompts.ts";
+import type { Boundary } from "./reminder.ts";
+import {
+	detectTaskChange,
+	digestAssistant,
+	newTaskState,
+	recordTurn,
+	type TaskState,
+} from "./task-detector.ts";
 import {
 	extractHits,
 	heuristicQueries,
@@ -58,6 +66,13 @@ export interface RecallInjectResult {
 	rawHits: string[];
 	/** True when `text` is the deep pass's synthesized briefing, not a bullet list. */
 	synthesized?: boolean;
+	/**
+	 * Normalized keys of the facts this call actually injected. The caller carries
+	 * them into the next turn's `priorSeen`, which is the ONLY way a synthesized
+	 * (prose) block's facts can be deduped — they leave no bullets in the
+	 * transcript for `seenInjectedFacts` to read back.
+	 */
+	injectedKeys: string[];
 }
 
 /**
@@ -87,6 +102,7 @@ function emptyRecall(): RecallInjectResult {
 		queried: false,
 		reason: "not queried",
 		rawHits: [],
+		injectedKeys: [],
 	};
 }
 
@@ -218,6 +234,11 @@ export async function runRecall(
 	prompt: string,
 	signal?: AbortSignal,
 	deep?: DeepPass,
+	/**
+	 * Facts injected earlier in this session that the transcript cannot show —
+	 * a deep pass injects prose, so its facts have no bullets to read back.
+	 */
+	priorSeen?: Iterable<string>,
 ): Promise<RecallInjectResult> {
 	const cwd = ctx.cwd ?? process.cwd();
 	const eff = deep
@@ -298,6 +319,7 @@ export async function runRecall(
 
 	const queryLabel = plan.queries.join(" | ");
 	const seen = seenInjectedFacts(ctx);
+	for (const key of priorSeen ?? []) seen.add(key);
 	// The effort setting is the REAL ceiling, enforced here rather than announced to
 	// the model: naming a number in the prompt made it a target (8 of 12 real turns
 	// hit the stated maximum exactly). recallMaxQueries stays as the absolute safety
@@ -379,6 +401,7 @@ export async function runRecall(
 		reason: degraded ? `${plan.reason} (degraded)` : "bank recalled facts",
 		rawHits: merged.map((h) => h.text),
 		synthesized: Boolean(deep && text && text !== bullets),
+		injectedKeys: finalHits.map((h) => normalizeLine(h.text)).filter(Boolean),
 	};
 }
 
@@ -414,4 +437,153 @@ async function synthesize(
 		});
 		return "";
 	}
+}
+
+/** What one turn's recall produced, plus what kind of turn it was. */
+export interface TurnRecall {
+	recall: RecallInjectResult;
+	boundary: Boundary;
+}
+
+/**
+ * One turn's recall, ordinary or deep.
+ *
+ * The vendor benchmarked injecting scattered facts on every turn and measured
+ * the agent getting WORSE (1.06 corrections/task vs 0.97 with no memory at
+ * all). So the bullet spray stays only for ordinary turns; at a TASK BOUNDARY
+ * we pay once for a wider recall and a synthesized briefing instead.
+ *
+ * Exactly three triggers: the detector said the task changed, the first turn
+ * of a session, the first turn after a compaction.
+ *
+ * The detector runs CONCURRENTLY with the ordinary recall, never in front of
+ * it: an ordinary turn must cost exactly what it costs today, and on a
+ * boundary the ordinary result is the price of not lengthening the hot path —
+ * and, when the deep pass fails, the fallback that keeps the turn from
+ * injecting nothing at all.
+ *
+ * `run`/`detect` are injectable for the self-test only; production always uses
+ * the real ones.
+ */
+export async function recallForTurn(args: {
+	ctx: ExtensionContext;
+	cfg: HindsightConfig;
+	client: HindsightClient;
+	chain: ModelChain;
+	prompt: string;
+	signal?: AbortSignal;
+	task: TaskState;
+	run?: typeof runRecall;
+	detect?: typeof detectTaskChange;
+}): Promise<TurnRecall> {
+	const { ctx, cfg, client, chain, prompt, signal, task } = args;
+	const run = args.run ?? runRecall;
+	const detect = args.detect ?? detectTaskChange;
+	const cwd = ctx.cwd ?? process.cwd();
+	const entries = ctx.sessionManager.getEntries() as Array<{
+		id?: string;
+		type?: string;
+	}>;
+	const sessionId = ctx.sessionManager.getSessionId?.();
+	const compactions = entries.filter((e) => e.type === "compaction").length;
+	if (task.sessionId !== sessionId) {
+		// Reset IN PLACE: the caller holds this object for the whole session.
+		Object.assign(task, newTaskState());
+		task.sessionId = sessionId;
+		task.compactions = compactions;
+	}
+	const firstTurn = !task.started;
+	// A compaction rewrites what the agent can see, so whatever memory was
+	// injected before it is gone: treat the next turn as a fresh boundary, and
+	// drop the carried-forward seen-set with it.
+	const afterCompact = compactions > task.compactions;
+	if (afterCompact) task.seenFacts.clear();
+	const boundary: Boundary = firstTurn || afterCompact ? "session" : "none";
+	task.compactions = compactions;
+	task.started = true;
+	recordTurn(task, digestAssistant(entries, task.markerId), prompt, cfg);
+	// Everything appended from here on is THIS turn's answer.
+	task.markerId = entries[entries.length - 1]?.id;
+
+	const remember = (out: TurnRecall): TurnRecall => {
+		for (const key of out.recall.injectedKeys) task.seenFacts.add(key);
+		return out;
+	};
+
+	if (!cfg.taskDetect)
+		return remember({
+			recall: await run(
+				ctx,
+				cfg,
+				client,
+				chain,
+				prompt,
+				signal,
+				undefined,
+				task.seenFacts,
+			),
+			boundary,
+		});
+	if (firstTurn || afterCompact) {
+		const deep: DeepPass = { title: task.title };
+		return remember({
+			recall: await run(
+				ctx,
+				cfg,
+				client,
+				chain,
+				prompt,
+				signal,
+				deep,
+				task.seenFacts,
+			),
+			boundary,
+		});
+	}
+	const ordinary = run(
+		ctx,
+		cfg,
+		client,
+		chain,
+		prompt,
+		signal,
+		undefined,
+		task.seenFacts,
+	).catch((err) => {
+		// Swallowed here so a discarded parallel run cannot reject unhandled;
+		// rethrown below only if we actually need its result.
+		return err as Error;
+	});
+	const verdict = await detect(ctx, cfg, chain, task, sessionId, signal);
+	if (verdict.changed) {
+		try {
+			return remember({
+				recall: await run(
+					ctx,
+					cfg,
+					client,
+					chain,
+					prompt,
+					signal,
+					{ query: verdict.query, title: verdict.title },
+					task.seenFacts,
+				),
+				boundary: "task" as Boundary,
+			});
+		} catch (err) {
+			// The deep pass is the one most likely to hit the recall ceiling, and a
+			// boundary is where memory is worth most — so degrade to the ordinary
+			// result we already paid for rather than to nothing. It only rethrows
+			// when that one failed too (an aborted turn takes both down).
+			appendDebug(cwd, "recall.deep.error", {
+				error: (err as Error).message,
+			});
+			const fallback = await ordinary;
+			if (fallback instanceof Error) throw err;
+			return remember({ recall: fallback, boundary: "task" as Boundary });
+		}
+	}
+	const result = await ordinary;
+	if (result instanceof Error) throw result;
+	return remember({ recall: result, boundary });
 }

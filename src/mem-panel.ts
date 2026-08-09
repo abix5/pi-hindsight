@@ -200,14 +200,6 @@ function settingItems(
 				"Ceiling on how many separate bank queries one recall may build: light = 2, normal = 3, thorough = 5. The model still uses as few as the request needs.",
 		},
 		{
-			id: "recallOperation",
-			label: "Recall operation",
-			currentValue: cfg.recallOperation,
-			values: ["recall", "reflect"],
-			description:
-				"recall returns raw stored facts; reflect makes the bank compose one answer from them.",
-		},
-		{
 			id: "recallFilter",
 			label: "Recall filter",
 			currentValue: cfg.recallFilter,
@@ -487,9 +479,15 @@ class MemPanel implements Component {
 
 	private async performEdit(doc: ReviewDoc, text: string): Promise<void> {
 		try {
-			// The queue spans projects, but a bank's language is a per-project
-			// setting, so this is the closest thing to the right one available here.
-			await editDoc(doc, text, this.deps.loadCfg().memoryLanguage);
+			// A queue entry can belong to ANOTHER project, and the bank's language is
+			// a per-project setting: re-extracting a foreign bank's document in THIS
+			// project's language would silently rewrite it. The language recorded on
+			// the entry at enqueue time wins; this project's is only the last resort.
+			await editDoc(
+				doc,
+				text,
+				doc.language || this.deps.loadCfg().memoryLanguage,
+			);
 			doc.text = text;
 			this.message = "saved — the bank is re-extracting the facts";
 		} catch (err) {
@@ -719,7 +717,7 @@ class MemPanel implements Component {
 			["Endpoint", `${cfg.baseUrl}  ns=${cfg.namespace}`],
 			["Auto recall", cfg.autoRecall ? "on" : "off"],
 			["Auto memorize", cfg.autoMemorize ? "on" : "off"],
-			["Effort", `${cfg.recallEffort} · ${cfg.recallOperation}`],
+			["Effort", cfg.recallEffort],
 			["Recall chain", chains.recall],
 			["Retain chain", chains.retain],
 			["Language", cfg.memoryLanguage],

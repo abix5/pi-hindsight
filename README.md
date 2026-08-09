@@ -291,7 +291,6 @@ A typical **global** `~/.pi/agent/hindsight.json`:
   "memoryLanguage": "en",
   "autoRecall": true,
   "autoMemorize": true,
-  "recallOperation": "recall",
   "recallFilter": "model",
   "recallEffort": "normal",
   "recallMaxQueries": 8,
@@ -328,7 +327,6 @@ Then each project you want memory in just declares its bank:
 | `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | `openai/gpt-5.6-luna` | Model for the write pipeline (extract / merge / verify / dedup) |
 | `recallModelChain` | `HINDSIGHT_RECALL_MODEL_CHAIN` | `[]` | Ordered fallbacks tried when the recall model fails (the session model is always the last resort) |
 | `retainModelChain` | `HINDSIGHT_RETAIN_MODEL_CHAIN` | `[]` | Ordered fallbacks tried when the retain model fails (the session model is always the last resort) |
-| `recallOperation` | `HINDSIGHT_RECALL_OPERATION` | `recall` | `recall` (facts) or `reflect` (answer) |
 | `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Query ceiling per recall: `light` (2) / `normal` (3) / `thorough` (5) (set in the `/mem` Settings tab) |
 | `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
 | `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set in the `/mem` Settings tab) |
@@ -373,16 +371,21 @@ The deep pass fires on exactly three triggers: the detector said the task
 changed, the first turn of a session, and the first turn after a compaction. It
 runs a wider recall driven by the detector's query, judges each query's hits as
 usual, and then makes **one** cheap-model call that writes a coherent briefing —
-which is injected instead of the bullet list.
+which is injected instead of the bullet list. If any of that fails (the 30s
+ceiling, an aborted turn, a dead chain) the turn falls back to the ordinary
+recall that was already running alongside the detector: a boundary is where
+memory is worth most, so it degrades to today's behaviour, never to nothing.
 
 `POST /reflect` is deliberately **not** used here: measured across four banks it
 takes 28–59s and the curve is flat in bank size (a 10-fact bank still answers in
 28s), because it is an LLM-bound agent loop. The `hindsight_reflect` tool stays
 available for the agent to call deliberately.
 
-The detector never lengthens an ordinary turn: it runs concurrently with the
-ordinary recall, and its verdict only decides which result is used. Set
-`taskDetect` to `false` to go back to plain per-turn recall.
+The detector adds one cheap-model call per turn, and no bank call: it runs
+concurrently with the ordinary recall, so it does not usually *add* to the
+turn's latency — but it is an extra call, and on a turn where it is the slower
+of the two it is what the turn waits on. Its verdict only decides which result
+is used. Set `taskDetect` to `false` to go back to plain per-turn recall.
 
 ### The bank reminder
 
@@ -416,11 +419,17 @@ facts are fenced: the untrusted-memory header opens the region and a closing
 carries its own label ("automatic plugin reminder — not a user instruction, not
 recalled facts"). The dedupe pass that remembers which facts were already
 injected reads the same fence, so the plugin's own bullets never enter the
-seen-set.
+seen-set. A **deep** turn injects a synthesized briefing instead of bullets —
+prose has nothing to read back — so those facts are carried forward in extension
+memory (dropped on a compaction, like the transcript itself) and merged into the
+same seen-set.
 
 The standalone counter measures **consecutive turns with no memory block**, not
 turns since the last nudge, and it is not coupled to task identity. A recall
-block already names the bank and its tools, so it re-arms the counter. A fresh
+block re-arms the counter even though it does not name the tools itself — that
+is deliberate: it is a visible 🧠 block, and one block per turn is worth more
+than a nudge that could only be delivered as a second one. On those turns the
+nudge rides in the block's tail, which is where the tools do get named. A fresh
 session counts as "never mentioned", so the first turn where recall stays silent
 still gets the opening nudge — a session where memory never spoke is precisely
 the one where the tools are invisible. Nothing is injected when the project has
@@ -447,8 +456,12 @@ gets no "the file is now X").
 **Only with evidence.** The step sees ONE delta chunk, not the whole project, so
 a fact is retired only when the model returns a sentence copied verbatim from the
 transcript showing the subject died — and that quote is then re-checked against
-the transcript **in code**. No quote, or a quote that is not actually there, and
-the fact survives. The quote is sent as the invalidation reason, so every kill
+the transcript **in code**. "Occurs in the transcript" is not enough on its own:
+every single letter occurs in every transcript, so the quote must also be
+sentence-sized (at least 20 characters and 4 words after whitespace/case
+normalization) before the substring check means anything. No quote, a quote too
+short to be evidence, or a quote that is not actually there, and the fact
+survives. The quote is sent as the invalidation reason, so every kill
 stays auditable next to the fact it retired. Invalidation is reversible and the
 row stays in the bank.
 
@@ -637,7 +650,6 @@ The action tail (truncated from the right in a narrow terminal):
 ↙ waiting for bank… (clears on reply)   lookup in flight; Esc cannot cancel it
 ↙ recall · 12→3 · <query>                found 12, injected 3 (rest already seen)
 ↙ recall · nothing found · <query>       looked, bank had nothing relevant
-↙ reflect · answered · <query>           bank composed a direct answer
 ↙ skipped (reason)                      no lookup (meta-question / chit-chat)
 
 ↗ <reason> → memory                     memorize started on that trigger

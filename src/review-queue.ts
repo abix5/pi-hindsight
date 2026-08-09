@@ -17,6 +17,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { readProjectOverrides } from "./config.ts";
 
 /** An "add" event: a document was stored and now awaits review. */
 export interface AddEvent {
@@ -28,6 +29,13 @@ export interface AddEvent {
 	project: string;
 	reason: string;
 	ts: string;
+	/**
+	 * The language THAT project's bank is kept in, stamped at enqueue time. The
+	 * queue is global and cross-project, so the reviewing session cannot infer it
+	 * later: re-extracting a hand-edited document under the reviewer's own
+	 * `memoryLanguage` silently rewrites a foreign bank in the wrong language.
+	 */
+	language?: string;
 }
 
 /** A "done" event: a document left the queue (approved or deleted). */
@@ -47,6 +55,8 @@ export interface PendingDoc {
 	project: string;
 	reason: string;
 	ts: string;
+	/** Language of the ORIGIN project's bank; "" for entries written before 0.4.1. */
+	language: string;
 }
 
 /** Fields the caller supplies for an add; ts/ev are filled in here. */
@@ -90,6 +100,7 @@ export function foldEvents(lines: Iterable<string>): PendingDoc[] {
 				project: str(rec.project),
 				reason: str(rec.reason),
 				ts: str(rec.ts),
+				language: str(rec.language),
 			});
 		} else if (rec.ev === "done") {
 			pending.delete(docId);
@@ -114,16 +125,32 @@ function appendEvent(rec: AddEvent | DoneEvent): void {
 	fs.appendFileSync(file, `${JSON.stringify(rec)}\n`);
 }
 
-/** Enqueue a stored document for review (best-effort; never throws). */
+/**
+ * Enqueue a stored document for review (best-effort; never throws).
+ *
+ * The origin project's `memoryLanguage` is stamped here when the caller does not
+ * supply one: at review time the entry may be read by a session in a DIFFERENT
+ * project whose bank is kept in another language.
+ */
 export function enqueueAdd(input: AddInput): void {
 	try {
 		appendEvent({
 			ev: "add",
 			...input,
+			language: input.language ?? projectLanguage(input.project),
 			ts: input.ts ?? new Date().toISOString(),
 		});
 	} catch {
 		/* best-effort: losing a review entry must never break the write path */
+	}
+}
+
+/** The bank language declared by a project's own config file ("" when it does not). */
+export function projectLanguage(projectDir: string): string {
+	try {
+		return readProjectOverrides(projectDir).memoryLanguage ?? "";
+	} catch {
+		return "";
 	}
 }
 

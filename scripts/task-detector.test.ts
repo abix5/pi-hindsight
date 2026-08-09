@@ -209,6 +209,91 @@ check(
 
 check("an empty state renders nothing to ask about", renderHistory(newTaskState()), []);
 
+/* ---------- m4: alternation survives a turn that got no verdict ---------- */
+
+// Two ways a turn ends with no verdict: the reply was INVALID (junk must not be
+// replayed as an assistant turn and few-shot-train the next call), or the model
+// call THREW and detectTaskChange returned before applyVerdict. Either way the
+// next turn appends another user turn — and consecutive user messages are a hard
+// 400 on a strict-alternation provider, which kills boundary detection silently
+// and permanently for the rest of the session.
+{
+	const s = newTaskState();
+	recordTurn(s, "", "first message", cfg);
+	applyVerdict(s, { changed: false, valid: false }, "Sure! The topic changed.", cfg);
+	check(
+		"an invalid reply is not stored as an assistant turn",
+		s.turns.map((t) => t.verdict),
+		[undefined],
+	);
+	recordTurn(s, "", "second message", cfg);
+	applyVerdict(s, { changed: false, valid: true }, '{"changed":false}', cfg);
+	recordTurn(s, "", "third message", cfg);
+	const roles = renderHistory(s).map((m) => m.role);
+	check("history stays strictly alternating across an invalid reply", roles, [
+		"user",
+		"assistant",
+		"user",
+	]);
+	check(
+		"and the unanswered message is folded in, not dropped",
+		renderHistory(s)[0].text.includes("first message") &&
+			renderHistory(s)[0].text.includes("second message"),
+		true,
+	);
+}
+
+{
+	// The error path: applyVerdict is never reached at all.
+	const s = newTaskState();
+	recordTurn(s, "", "turn one", cfg); // model threw — no verdict recorded
+	recordTurn(s, "", "turn two", cfg); // model threw again
+	recordTurn(s, "", "turn three", cfg);
+	const msgs = renderHistory(s);
+	check(
+		"history stays strictly alternating across thrown detector calls",
+		msgs.map((m) => m.role),
+		["user"],
+	);
+	check(
+		"every unanswered message still reaches the model",
+		["turn one", "turn two", "turn three"].every((t) => msgs[0].text.includes(t)),
+		true,
+	);
+}
+
+/* ---------- M3: the user side of the history is capped ---------- */
+
+{
+	// `event.prompt` is the EXPANDED prompt: one `@file` reference inlines a whole
+	// file. Uncapped, that sat in the detector prefix for the next twelve turns
+	// and went into the long-retention cache.
+	const s = newTaskState();
+	const huge = `look at @big.ts ${"x".repeat(200_000)} and tell me what changed`;
+	recordTurn(s, "", huge, cfg);
+	const stored = s.turns[0].user;
+	check("an expanded @file prompt is capped", stored.length < 700, true);
+	check(
+		"the head of the instruction survives",
+		stored.includes("look at @big.ts"),
+		true,
+	);
+	check(
+		"and so does the tail",
+		stored.includes("tell me what changed"),
+		true,
+	);
+	check(
+		"an ordinary message is stored verbatim",
+		(() => {
+			const t = newTaskState();
+			recordTurn(t, "", "fix the widget please", cfg);
+			return t.turns[0].user;
+		})(),
+		"USER: fix the widget please",
+	);
+}
+
 /* ---------- answer digest ---------- */
 
 const entries = [

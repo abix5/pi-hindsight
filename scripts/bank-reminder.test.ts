@@ -370,6 +370,7 @@ check(
 			queried: true,
 			reason: "bank recalled facts",
 			rawHits: [],
+			injectedKeys: [],
 		},
 		reminderText("my-bank", { documents: 12, facts: 300 }),
 	);
@@ -389,6 +390,54 @@ check(
 	check(
 		"the plugin tail below the fence is not",
 		seen.filter((s) => s.includes("hindsight_recall") || s.includes("project bank")),
+		[],
+	);
+}
+
+// m1 — the fence must be matched as a WHOLE LINE. This repo's own bank holds
+// facts about the fence, and a bare substring search ended the region at the
+// first fact that merely mentioned it, dropping every fact below.
+{
+	const content = recallTrace(
+		{
+			found: 3,
+			injected: 3,
+			skippedSeen: 0,
+			skippedFiltered: 0,
+			text: [
+				"- The block is closed by a --- end of recalled memory --- line.",
+				"- The widget is one fixed line.",
+				"- The bank lives at http://localhost:8888.",
+			].join("\n"),
+			query: "how is the recall block delimited",
+			operation: "recall",
+			queried: true,
+			reason: "bank recalled facts",
+			rawHits: [],
+			injectedKeys: [],
+		},
+		reminderText("my-bank"),
+	);
+	const ctx = {
+		sessionManager: {
+			getEntries: () => [
+				{ type: "custom_message", customType: "mem-recall", content },
+			],
+		},
+	} as unknown as Parameters<typeof seenInjectedFacts>[0];
+	const seen = [...seenInjectedFacts(ctx)];
+	check(
+		"a fact that quotes the fence does not truncate the region",
+		[
+			seen.some((s) => s.includes("end of recalled memory")),
+			seen.some((s) => s.includes("one fixed line")),
+			seen.some((s) => s.includes("localhost")),
+		],
+		[true, true, true],
+	);
+	check(
+		"and the plugin tail is still excluded",
+		seen.filter((s) => s.includes("hindsight_recall")),
 		[],
 	);
 }

@@ -21,7 +21,8 @@ process.env.HOME = tmpHome;
 process.env.USERPROFILE = tmpHome;
 delete process.env.HINDSIGHT_BANK;
 
-const { loadConfig, globalConfigPath } = await import("../src/config.ts");
+const { loadConfig, globalConfigPath, readProjectOverrides, CONFIG_ALLOW } =
+	await import("../src/config.ts");
 
 let failures = 0;
 function check(name: string, cond: boolean): void {
@@ -138,6 +139,27 @@ function slugOf(cwd: string): string {
 	check("(f) auto-off beats project autoRecall", off.autoRecall === false);
 	check("(f) auto-off beats project autoMemorize", off.autoMemorize === false);
 	check("(f) auto-off leaves the bank active", off.active === true);
+}
+
+// (g) `recallOperation` is gone, not merely ignored -------------------------
+{
+	// It was a documented, /mem-settable, persisted switch that NOTHING read:
+	// parseQueryPlan hard-codes op:"recall" and runRecall never looked at it. A
+	// user flipped it and nothing happened, so the key must not survive anywhere
+	// — including as an accepted config-file key that gets written back to
+	// .pi/hindsight.json.
+	process.env.HINDSIGHT_RECALL_OPERATION = "reflect";
+	writeGlobal({ bankId: "g" });
+	const cwd = makeCwd("g", { recallOperation: "reflect" } as never);
+	cleanup.push(cwd);
+	const cfg = loadConfig(cwd) as Record<string, unknown>;
+	delete process.env.HINDSIGHT_RECALL_OPERATION;
+	check("(g) recallOperation is not a config key", !("recallOperation" in cfg));
+	check(
+		"(g) a recallOperation in the project file is not accepted",
+		!("recallOperation" in readProjectOverrides(cwd)),
+	);
+	check("(g) CONFIG_ALLOW has dropped it", !CONFIG_ALLOW.has("recallOperation" as never));
 }
 
 for (const dir of cleanup) fs.rmSync(dir, { recursive: true, force: true });

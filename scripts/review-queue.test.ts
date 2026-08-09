@@ -109,6 +109,52 @@ function check(name: string, cond: boolean): void {
 	check("append-only: 3 event lines on disk", lineCount === 3);
 }
 
+// --- m6: the ORIGIN project's bank language is stamped at enqueue time -----
+{
+	// The queue is global and cross-project. Without the language on the entry,
+	// the reviewing session re-extracts a hand-edited document under ITS OWN
+	// memoryLanguage — silently rewriting a foreign bank in the wrong language.
+	const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "foreign-proj-"));
+	fs.mkdirSync(path.join(foreign, ".pi"), { recursive: true });
+	fs.writeFileSync(
+		path.join(foreign, ".pi", "hindsight.json"),
+		JSON.stringify({ bankId: "foreign", memoryLanguage: "russian" }),
+	);
+	enqueueAdd({
+		docId: "d3",
+		bank: "foreign",
+		baseUrl: "http://localhost:8888",
+		namespace: "default",
+		project: foreign,
+		reason: "compact",
+	});
+	const entry = loadPending().find((p) => p.docId === "d3");
+	check(
+		"the entry carries the origin project's memoryLanguage",
+		entry?.language === "russian",
+	);
+	// A project that declares none leaves the field empty rather than guessing.
+	enqueueAdd({
+		docId: "d4",
+		bank: "bank",
+		baseUrl: "http://localhost:8888",
+		namespace: "default",
+		project: path.join(tmpDir, "no-such-project"),
+		reason: "compact",
+	});
+	check(
+		"a project with no declared language stamps nothing",
+		loadPending().find((p) => p.docId === "d4")?.language === "",
+	);
+	// A legacy line (written before the field existed) folds to "".
+	check(
+		"legacy entries fold to an empty language",
+		foldEvents([JSON.stringify({ ev: "add", docId: "old", project: "p" })])[0]
+			.language === "",
+	);
+	fs.rmSync(foreign, { recursive: true, force: true });
+}
+
 fs.rmSync(tmpDir, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
