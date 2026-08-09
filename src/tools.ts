@@ -8,11 +8,13 @@
 
 import { StringEnum } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import * as path from "node:path";
 import { Type } from "typebox";
 import type { HindsightConfig } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug } from "./log.ts";
 import { formatRecallHits } from "./recall.ts";
+import { retainContext, retainMetadata } from "./retain-hygiene.ts";
 
 const RetainParams = Type.Object({
 	content: Type.String({
@@ -74,10 +76,23 @@ export function registerTools(
 			});
 			if (!s) return fail("hindsight not initialized");
 			const kind = params.kind ?? "fact";
+			const cwd = process.cwd();
 			try {
+				const provenance = {
+					project: path.basename(cwd),
+					language: s.cfg.memoryLanguage,
+				};
 				await s.client.retain(
 					params.content,
-					{ tags: [s.cfg.bankId, "agent-manual", kind] },
+					{
+						tags: [s.cfg.bankId, "agent-manual", kind],
+						// This path used to send bare content. It is also the path the
+						// agent writes in whatever language the CONVERSATION is in, which
+						// is how a single-language bank ended up bilingual — the language
+						// line in the context is what converts such a note on extraction.
+						context: retainContext("agent-note", provenance),
+						metadata: retainMetadata("agent-note", provenance),
+					},
 					signal,
 				);
 				appendDebug(process.cwd(), "tool.retain.done", { kind });

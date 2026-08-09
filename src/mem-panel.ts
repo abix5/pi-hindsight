@@ -487,7 +487,9 @@ class MemPanel implements Component {
 
 	private async performEdit(doc: ReviewDoc, text: string): Promise<void> {
 		try {
-			await editDoc(doc, text);
+			// The queue spans projects, but a bank's language is a per-project
+			// setting, so this is the closest thing to the right one available here.
+			await editDoc(doc, text, this.deps.loadCfg().memoryLanguage);
 			doc.text = text;
 			this.message = "saved — the bank is re-extracting the facts";
 		} catch (err) {

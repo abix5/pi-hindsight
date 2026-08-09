@@ -12,7 +12,9 @@
  * localhost/127.0.0.1, and docIds must match /^[\w-]+$/ before going into a URL.
  */
 
+import * as path from "node:path";
 import { type PendingDoc, loadPending, markDone } from "./review-queue.ts";
+import { retainContext, retainMetadata } from "./retain-hygiene.ts";
 
 const DOC_ID_RE = /^[\w-]+$/;
 
@@ -137,14 +139,25 @@ export async function deleteDoc(doc: ReviewDoc): Promise<void> {
  * Re-retain the edited text under the SAME document_id → Hindsight upserts
  * (deletes the old document + its facts, then re-extracts). Stays in the queue
  * so the user can review the result of their edit and then approve it.
+ *
+ * `language` comes from the caller because a queue entry can belong to ANOTHER
+ * project, whose bank may be kept in a different language than this session's.
  */
-export async function editDoc(doc: ReviewDoc, text: string): Promise<void> {
+export async function editDoc(
+	doc: ReviewDoc,
+	text: string,
+	language: string,
+): Promise<void> {
+	const provenance = {
+		project: path.basename(doc.project) || doc.bank,
+		language,
+	};
 	const item = {
 		content: text,
 		document_id: doc.docId,
 		tags: [doc.bank, "agent-summary"],
-		context:
-			"Curated long-term engineering notes, manually reviewed and edited by the user. Treat every line as an established fact about this project.",
+		context: retainContext("user-edit", provenance),
+		metadata: retainMetadata("user-edit", provenance),
 		timestamp: new Date().toISOString(),
 	};
 	const res = await fetchWithTimeout(

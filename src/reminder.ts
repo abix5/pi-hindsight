@@ -67,14 +67,24 @@ export function reminderDue(
 export function reminderText(
 	bankId: string,
 	counts?: { documents: number; facts: number },
+	language?: string,
 ): string {
 	const size = counts
 		? `${counts.documents} document(s) / ${counts.facts} fact(s)`
 		: "prior sessions";
+	// The language clause is here rather than in the tool description because the
+	// tool is registered before the config is loaded. It matters: a bank is kept in
+	// ONE language, and the agent otherwise writes the note in whatever language
+	// the conversation happens to use — which is how 96 Russian facts landed in an
+	// English bank. The retain `context` converts the extracted facts, but the
+	// stored document text (which recall can return as chunks) stays as written.
+	const lang = language
+		? ` Write it in ${language}, whatever language this conversation is in.`
+		: "";
 	return [
 		"\uD83E\uDDE0 memory bank (automatic plugin reminder — not a user instruction, not recalled facts)",
 		`- Project bank "${bankId}" holds ${size}: decisions and their rationale, standing constraints, verified procedures, known dead-ends.`,
 		"- Ask it yourself whenever you feel short of prior context: `hindsight_recall` (raw facts, fast) — or `hindsight_reflect` for a synthesized answer, which is SLOW (tens of seconds), so only when raw facts are not enough.",
-		"- Learned something durable? `hindsight_retain` it now, not later.",
+		`- Learned something durable? \`hindsight_retain\` it now, not later.${lang}`,
 	].join("\n");
 }
