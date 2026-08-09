@@ -57,6 +57,10 @@ export interface HindsightConfig {
 	deepRecallQueries: number;
 	/** Judged facts fed to the deep pass synthesis (wider than an ordinary turn's inject cap). */
 	deepRecallMaxLines: number;
+	/** Inject the short "the bank exists, ask it" reminder at session start and every N turns. */
+	bankReminder: boolean;
+	/** Turns between reminders. Too small pollutes context, too large and the tools are forgotten. */
+	bankReminderTurns: number;
 	/**
 	 * Fact-category configurator for the memorize contour. Loose shape:
 	 * `{ <key>: "on"|"off"|"ban", custom?: CustomCategory[] }`. Parsed by categories.ts.
@@ -175,6 +179,8 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"taskTitleTail",
 	"deepRecallQueries",
 	"deepRecallMaxLines",
+	"bankReminder",
+	"bankReminderTurns",
 	"factCategories",
 	"recallFilter",
 	"recallBudget",
@@ -268,6 +274,8 @@ export function loadConfig(cwd: string): HindsightConfig {
 		taskTitleTail: envInt("HINDSIGHT_TASK_TITLE_TAIL", 8),
 		deepRecallQueries: envInt("HINDSIGHT_DEEP_RECALL_QUERIES", 5),
 		deepRecallMaxLines: envInt("HINDSIGHT_DEEP_RECALL_MAX_LINES", 24),
+		bankReminder: envBool("HINDSIGHT_BANK_REMINDER", true),
+		bankReminderTurns: envInt("HINDSIGHT_BANK_REMINDER_TURNS", 10),
 		recallFilter:
 			process.env.HINDSIGHT_RECALL_FILTER === "off" ? "off" : "model",
 		recallBudget: (process.env.HINDSIGHT_RECALL_BUDGET as Budget) || "mid",

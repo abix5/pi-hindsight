@@ -10,6 +10,11 @@ import { appendDebug, appendLog, setDebugEnabled } from "./log.ts";
 import { Memorizer } from "./memorize.ts";
 import { resolveChain } from "./model.ts";
 import { type DeepPass, runRecall } from "./recall.ts";
+import {
+	newReminderState,
+	reminderDue,
+	reminderText,
+} from "./reminder.ts";
 import { loadState, saveState } from "./state.ts";
 import {
 	detectTaskChange,
@@ -201,6 +206,12 @@ export default function (pi: ExtensionAPI) {
 	// which reads as "first turn of a session" and does one deep pass.
 	let task: TaskState = newTaskState();
 
+	// Bank-reminder cadence, same per-instance/per-session discipline as `task`.
+	const reminder = newReminderState();
+	// Last successful stats poll, so the reminder can say how big the bank is
+	// without a request of its own — it must never touch the network.
+	let bankCounts: { documents: number; facts: number } | undefined;
+
 	// Recall runs in `before_agent_start` so its result can be injected as a VISIBLE
 	// custom_message block (the only entry type that both renders in the TUI and
 	// reaches the model). That phase is pre-turn/preflight: the agent loop has not
@@ -240,6 +251,7 @@ export default function (pi: ExtensionAPI) {
 			// A successful stats call proves the bank is reachable, so keep the resting
 			// dot green even if the initial ensureBank was slow or briefly failed.
 			status.bankOk();
+			bankCounts = { documents: s.documents, facts: s.facts };
 			status.setBankCounts(s.documents, s.facts);
 		} catch {
 			/* counts are best-effort */
@@ -347,6 +359,7 @@ export default function (pi: ExtensionAPI) {
 			}
 			try {
 				const s = await client.stats(ctx.signal);
+				bankCounts = { documents: s.documents, facts: s.facts };
 				status.setBankCounts(s.documents, s.facts);
 			} catch {
 				/* counts are best-effort */
@@ -509,6 +522,28 @@ export default function (pi: ExtensionAPI) {
 			clearTimeout(ceiling);
 			ctx.signal?.removeEventListener("abort", onAbort);
 		}
+	});
+
+	// Periodic nudge that the bank exists and can be queried deliberately. Its own
+	// handler on purpose: the runner collects a message from EVERY before_agent_start
+	// handler, so the reminder stays independent of whether recall found anything —
+	// and it is pure local string work, so it adds nothing to the hot path.
+	pi.on("before_agent_start", async (_event, ctx) => {
+		if (standDown || !cfg) return;
+		const due = reminderDue(reminder, ctx.sessionManager?.getSessionId?.(), {
+			enabled: cfg.bankReminder,
+			everyTurns: cfg.bankReminderTurns,
+			active: cfg.active,
+			autoRecall: runtime.autoRecall,
+		});
+		if (!due) return;
+		return {
+			message: {
+				customType: "mem-reminder",
+				content: reminderText(cfg.bankId, bankCounts),
+				display: true,
+			},
+		};
 	});
 
 	pi.on("session_before_compact", async (event, ctx) => {
