@@ -409,6 +409,8 @@ export class Memorizer {
 		// then collapses to nothing even though the conversation has moved on. That is
 		// not an idle session, and "/mem-save all" is actively wrong advice for it:
 		// re-collecting everything would delete and rewrite documents that are fine.
+		// A plain /mem-save is the right lever — it passes no boundary, so it takes the
+		// whole pending tail immediately instead of waiting for compaction to reach it.
 		if (!deltaText.trim()) {
 			const pending = boundaryId
 				? getDeltaEntries(entries, watermark, undefined).length
@@ -432,7 +434,7 @@ export class Memorizer {
 			this.notify(
 				ctx,
 				blocked
-					? `already saved through the live tail — ${pending} newer entr${plural} stay in context and reach the bank once compaction passes them (nothing is lost, no action needed)`
+					? `already saved through the live tail — ${pending} newer entr${plural} still waiting for compaction to reach them (nothing is lost; /mem-save writes them now)`
 					: "nothing new since last flush — memory is up to date (use /mem-save all to re-collect the whole session)",
 			);
 			return;
