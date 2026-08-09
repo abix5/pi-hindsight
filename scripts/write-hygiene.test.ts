@@ -217,9 +217,13 @@ check(
 
 // ------------------------------------------------------ write notification
 
-// The old line was `wrote 1 document · 5 note lines`: the document count is
-// hardcoded 1 (the inline path writes exactly one), so it carried no
-// information, and line counts never said WHAT landed in the bank.
+// The old line was `wrote 1 document · 5 note lines`: line counts never said
+// WHAT landed in the bank. The one-line replacement was no better — it cut every
+// subject at 34 characters and hid the rest behind "(+N more)". `ctx.ui.notify`
+// lands in an ordinary chat Text node (pi-tui's wrapTextWithAnsi splits on \n and
+// re-emits the active style per line), so the notice is multi-line: a headline of
+// counts, then one readable subject per line. RPC clients get the raw string, so
+// \n is the ONLY control character allowed anywhere in it.
 
 const normalNote = [
 	"## Decisions:",
@@ -230,19 +234,24 @@ const normalNote = [
 	"- Never commit `.pi/hindsight.json`.",
 ].join("\n");
 
-console.log(`\nNOTICE normal:    ${JSON.stringify(writeNotice(normalNote))}`);
+console.log(`\nNOTICE normal:\n${writeNotice(normalNote)}`);
 check(
-	"a normal note names its subjects",
+	"a normal note lists every subject in full",
 	writeNotice(normalNote),
-	"saved 3 lines: Recall effort is a real ceiling\u2026; The bank reminder counts silent\u2026 (+1 more)",
+	[
+		"saved 1 note \u00b7 3 lines",
+		"  \u00b7 Recall effort is a real ceiling, not a prompt anchor.",
+		"  \u00b7 The bank reminder counts silent turns instead of a fixed modulo.",
+		"  \u00b7 Never commit .pi/hindsight.json.",
+	].join("\n"),
 );
 
 const oneBullet = "- Compaction is the only trigger for the inline write path.";
-console.log(`NOTICE one:       ${JSON.stringify(writeNotice(oneBullet))}`);
+console.log(`\nNOTICE one:\n${writeNotice(oneBullet)}`);
 check(
-	"a one-bullet note says one subject and no \u201cmore\u201d",
+	"a one-bullet note is a headline and one subject",
 	writeNotice(oneBullet),
-	"saved 1 line: Compaction is the only trigger\u2026",
+	"saved 1 note \u00b7 1 line\n  \u00b7 Compaction is the only trigger for the inline write path.",
 );
 
 // Awkward: a bullet that spans lines, one that is a single unbreakable token,
@@ -256,54 +265,100 @@ const awkward = [
 	"  because the model wrote it that way.",
 ].join("\n");
 const awkwardNotice = writeNotice(awkward);
-console.log(`NOTICE awkward:   ${JSON.stringify(awkwardNotice)}`);
+console.log(`\nNOTICE awkward:\n${awkwardNotice}`);
 check(
 	"awkward bullets still yield clean subjects",
 	awkwardNotice,
-	"saved 5 lines: red alert: the widget must render\u2026; supercalifragilisticexpialidocious\u2026 (+1 more)",
+	[
+		"saved 1 note \u00b7 5 lines",
+		"  \u00b7 red alert: the widget must render exactly one line",
+		"  \u00b7 supercalifragilisticexpialidociousandthensomemoreletters follows",
+		"  \u00b7 A bullet whose text wraps onto a second line",
+	].join("\n"),
 );
 check("no ANSI escape reaches the notification", /\u001b/.test(awkwardNotice), false);
 check(
-	"no control character reaches the notification",
-	/[\u0000-\u001f\u007f]/.test(awkwardNotice),
+	"newline is the only control character in the notification",
+	/[\u0000-\u0009\u000b-\u001f\u007f]/.test(awkwardNotice),
 	false,
+);
+
+// A genuinely long note is the ONLY case allowed to hide a remainder.
+const longNote = Array.from(
+	{ length: 9 },
+	(_, i) => `- Subject number ${i + 1} of a note that will not stop growing.`,
+).join("\n");
+const longNotice = writeNotice(longNote);
+console.log(`\nNOTICE long:\n${longNotice}`);
+check("a long note keeps 5 subjects", longNotice.split("\n").length, 7);
+check("a long note names the remainder", longNotice.endsWith("  \u00b7 +4 more"), true);
+check(
+	"a 5-subject note hides nothing",
+	writeNotice(longNote.split("\n").slice(0, 5).join("\n")).includes("more"),
+	false,
+);
+
+// A subject longer than one terminal line is still cut — on a word boundary.
+const hugeBullet = `- ${"word ".repeat(40)}end`;
+const hugeSubject = writeNotice(hugeBullet).split("\n")[1] ?? "";
+console.log(`\nNOTICE huge:\n${writeNotice(hugeBullet)}`);
+check("an over-long subject is cut", hugeSubject.endsWith("\u2026"), true);
+check(
+	"\u2026 on a word boundary, never mid-word",
+	/^  \u00b7 (word )*word\u2026$/.test(hugeSubject),
+	true,
 );
 
 // Empty / subject-less input must fall back to the counts it replaced, never to
 // a half-built sentence.
-console.log(`NOTICE empty:     ${JSON.stringify(writeNotice(""))}`);
-check("an empty note degrades to counts", writeNotice(""), "wrote 0 note lines");
+console.log(`\nNOTICE empty:     ${JSON.stringify(writeNotice(""))}`);
+check("an empty note degrades to counts", writeNotice(""), "saved 1 note \u00b7 0 lines");
 check(
 	"a note with no legible subject degrades to counts",
 	writeNotice("- ---\n- ***"),
-	"wrote 2 note lines",
+	"saved 1 note \u00b7 2 lines",
 );
 
 // A kill is otherwise invisible: the fact is gone from the bank and nothing in
-// the UI ever said so.
+// the UI ever said so. It belongs on the headline, above the subjects.
 const withKills = writeNotice(normalNote, 2);
-console.log(`NOTICE kills:     ${JSON.stringify(withKills)}`);
-check("invalidations are surfaced", withKills.endsWith(" \u00b7 2 facts retired"), true);
+console.log(`\nNOTICE kills:\n${withKills}`);
+check(
+	"invalidations are surfaced on the headline",
+	withKills.split("\n")[0],
+	"saved 1 note \u00b7 3 lines \u00b7 2 facts retired",
+);
 check(
 	"one kill is singular",
-	writeNotice(oneBullet, 1).endsWith(" \u00b7 1 fact retired"),
+	writeNotice(oneBullet, 1).split("\n")[0]?.endsWith(" \u00b7 1 fact retired"),
 	true,
 );
 check(
 	"kills survive the degraded path",
 	writeNotice("", 3),
-	"wrote 0 note lines \u00b7 3 facts retired",
+	"saved 1 note \u00b7 0 lines \u00b7 3 facts retired",
 );
 check("no kills, no suffix", writeNotice(normalNote, 0).includes("retired"), false);
 
-// It is a notification, not a report.
+// It is a notice, not a report.
 for (const [label, notice] of [
 	["normal", writeNotice(normalNote, 2)],
 	["awkward", awkwardNotice],
+	["one", writeNotice(oneBullet)],
+	["empty", writeNotice("", 3)],
 	["long", writeNotice(`- ${"word ".repeat(200)}\n- ${"x".repeat(400)}`, 9)],
 ] as const) {
-	check(`${label}: single line`, notice.includes("\n"), false);
-	check(`${label}: stays short`, notice.length <= 120, true);
+	const rows = notice.split("\n");
+	check(`${label}: at most 6 rows`, rows.length <= 6, true);
+	// 73 = `  · ` + SUBJECT_MAX + the ellipsis: fits an 80-column terminal after
+	// the chat Text node's own 1-column padding on each side.
+	check(`${label}: no row wider than 73`, Math.max(...rows.map((r) => r.length)) <= 73, true);
+	check(
+		`${label}: newline is the only control char`,
+		/[\u0000-\u0009\u000b-\u001f\u007f]/.test(notice),
+		false,
+	);
+	check(`${label}: no blank row`, rows.some((r) => !r.trim()), false);
 }
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);

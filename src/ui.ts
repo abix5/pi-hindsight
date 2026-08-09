@@ -2,7 +2,8 @@
  * Persistent status surface for pi-hindsight.
  *
  * A single widget block above the editor (same primitive todo/plan-mode use)
- * shows bank connection + live recall/memorize state on exactly ONE line. There
+ * shows bank connection + live recall/memorize state on exactly ONE line, plus
+ * a retired-facts badge when the bank has killed anything this session. There
  * is deliberately no status-bar strip: it duplicated the widget's dot. Any strip
  * left by an older version is cleared on the next render.
  *
@@ -94,6 +95,13 @@ export class HindsightStatus {
 		reason: "",
 		detail: "",
 		session: 0,
+		/**
+		 * Facts invalidated this SESSION, not this write. A kill is rare and the
+		 * write that caused it scrolls out of the transcript within a turn; the
+		 * widget's job is to answer "has memory retired anything here?" for as long
+		 * as the session lives. A transient badge would be gone before it was read.
+		 */
+		retired: 0,
 	};
 
 	/** Point at the current UI (call on each event; the reference can change). */
@@ -250,6 +258,12 @@ export class HindsightStatus {
 		this.lastAction = { text: `↗! ${msg}`, tone: "error" };
 		this.render();
 	}
+	/** Facts the bank retired as contradicted; accumulated over the session. */
+	memoRetired(count: number): void {
+		if (count < 1) return;
+		this.memo.retired += count;
+		this.render();
+	}
 
 	// --- rendering ----------------------------------------------------------
 	private c(color: ThemeColor, s: string): string {
@@ -323,12 +337,19 @@ export class HindsightStatus {
 		const name = trunc(this.bank.id || "(none)", 20);
 		const mode = this.autoMode();
 		const counts = this.bank.state === "ok" ? this.counts() : "";
+		// Kills ride WITH the fact count (`153f↓3` = three of them retired this
+		// session), in the fixed head rather than the tail: three columns, and the
+		// thing that gives way when the line is tight is the last action, which
+		// repeats every turn and is the cheapest thing on the line to lose.
+		const kills = this.memo.retired > 0 ? `\u2193${this.memo.retired}` : "";
+		const sizePlain = `${counts}${kills}`;
+		const size = `${counts ? this.c("muted", counts) : ""}${kills ? this.c("warning", kills) : ""}`;
 		// Every state icon (● ◐ ○ ⟳) is one column, so one stands in for all of
 		// them while measuring.
-		const headPlain = `🧠 ● ${name} ${mode.text}${counts ? ` ${counts}` : ""}`;
+		const headPlain = `🧠 ● ${name} ${mode.text}${sizePlain ? ` ${sizePlain}` : ""}`;
 		const head =
 			`${this.c("accent", "🧠")} ${icon} ${this.c("dim", name)}` +
-			` ${this.c(mode.tone, mode.text)}${counts ? ` ${this.c("muted", counts)}` : ""}`;
+			` ${this.c(mode.tone, mode.text)}${sizePlain ? ` ${size}` : ""}`;
 
 		const tail = this.tail();
 		const text = trunc(tail.text, MAX_COLS - width(headPlain) - 3);
