@@ -115,6 +115,37 @@ rationale, constraints, verified know-how, pitfalls, concrete locations) and
 away from session narration and one-off task chatter. The sync is a no-op when
 the bank already matches.
 
+#### What every write carries: `context` and `metadata`
+
+All three write paths — the automatic session note, the agent's deliberate
+`hindsight_retain`, and a document you edited in the Review tab — build their
+`context` and `metadata` from one helper (`src/retain-hygiene.ts`). Neither is
+decoration: Hindsight splices both straight into its own fact-extraction prompt.
+
+The `context` does two jobs.
+
+**It names the speaker**, because that is what decides a fact's type. A
+first-person claim by the bank's own agent is stored as an `experience`;
+everything else is a `world` fact. These notes are knowledge *about* a project,
+not a diary, so the context says in as many words that the assistant is not the
+speaker. Measured on the live server, the same note under a context reading
+*"The assistant is speaking"* came back **40% `experience`**; under the shipped
+wording, **0%**.
+
+**It pins the language**, because nothing else can. Hindsight's extractor is
+ordered to detect the input language and forbidden to translate, there is no
+per-bank language setting, and `retain` has no language field — so a note
+written in the wrong language becomes facts in the wrong language, which is how
+one bank ended up 96 ru / 286 en. An imperative in the `context` overrides it:
+the same Russian note extracted **76% Cyrillic** facts through the old context
+and **0%** through the new one. (The old wording said *"The note is written in
+ru"* — a description, which steered nothing.)
+
+The `metadata` is four fields, stored on every fact the document produces and
+returned with every recalled hit: `source` (which of the three write paths
+wrote it), `project`, `session`, and `language` (the language that was *asked*
+for — without it, a config flipped mid-life is invisible afterwards).
+
 ### Review (`/mem` → Review tab)
 
 Documents are stored to the bank **immediately** (so dedup and recall always
@@ -312,7 +343,7 @@ Then each project you want memory in just declares its bank:
 | `deepRecallMaxLines` | `HINDSIGHT_DEEP_RECALL_MAX_LINES` | `24` | Judged facts fed to the deep pass synthesis |
 | `bankReminder` | `HINDSIGHT_BANK_REMINDER` | `true` | Inject the short "the bank exists, ask it" nudge (see below) |
 | `bankReminderTurns` | `HINDSIGHT_BANK_REMINDER_TURNS` | `10` | Turns between nudges (the first one rides on the first turn of a session) |
-| `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim) |
+| `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim). Enforced three ways: in the write-path prompts, as an imperative in the retain `context` (which converts facts the bank would otherwise store in the note's own language), and in the periodic reminder that tells the agent what language to `hindsight_retain` in |
 | `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
 | `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
 | `dispatchLogPath` | `HINDSIGHT_DISPATCH_LOG_PATH` | `.pi/hindsight/dispatch-log.jsonl` | Journal of stored documents (powers `/mem-save all` cleanup) |
@@ -523,9 +554,14 @@ normal outcome, not a failure.
 
 All memory is written in one configured language (`memoryLanguage`, default
 English) regardless of the conversation's language, so the same fact never
-exists in two tongues and semantic search stays sharp. The `dedup` phase and
-deterministic `document_id`s mean the same fact is not stored twice, even
-across sessions.
+exists in two tongues and semantic search stays sharp. The write-path prompts
+alone are not enough for that: Hindsight's own extractor is ordered to keep the
+input's language and forbidden to translate, so anything reaching the bank in
+another language — above all a `hindsight_retain` the agent wrote mid-Russian
+conversation — becomes facts in that language. The retain `context` carries the
+language as an imperative, which converts them at extraction time. The `dedup`
+phase and deterministic `document_id`s mean the same fact is not stored twice,
+even across sessions.
 
 ### Fact categories (`/mem` → Settings)
 
