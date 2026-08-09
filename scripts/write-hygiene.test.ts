@@ -15,12 +15,15 @@
  *      line, 0% with it);
  *   4. the request the client sends is the shape the live server accepts, and
  *      `document_id` still rides along so upsert behaviour is unchanged;
- *   5. the bank-config PATCH keeps its `{updates:{…}}` wrapper (bare keys 422).
+ *   5. the bank-config PATCH keeps its `{updates:{…}}` wrapper (bare keys 422);
+ *   6. the post-write notification names WHAT was stored, on ONE line, with no
+ *      ANSI and no newline — and degrades to counts rather than to garbage.
  */
 
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { HindsightClient } from "../src/hindsight.ts";
+import { writeNotice } from "../src/memorize.ts";
 import { reminderText } from "../src/reminder.ts";
 import {
 	type RetainSource,
@@ -211,6 +214,97 @@ check(
 	reminderText("pi-hindsight").includes("Write it in"),
 	false,
 );
+
+// ------------------------------------------------------ write notification
+
+// The old line was `wrote 1 document · 5 note lines`: the document count is
+// hardcoded 1 (the inline path writes exactly one), so it carried no
+// information, and line counts never said WHAT landed in the bank.
+
+const normalNote = [
+	"## Decisions:",
+	"- Recall effort is a real ceiling, not a prompt anchor.",
+	"- The bank reminder counts silent turns instead of a fixed modulo.",
+	"",
+	"## Constraints:",
+	"- Never commit `.pi/hindsight.json`.",
+].join("\n");
+
+console.log(`\nNOTICE normal:    ${JSON.stringify(writeNotice(normalNote))}`);
+check(
+	"a normal note names its subjects",
+	writeNotice(normalNote),
+	"saved 3 lines: Recall effort is a real ceiling\u2026; The bank reminder counts silent\u2026 (+1 more)",
+);
+
+const oneBullet = "- Compaction is the only trigger for the inline write path.";
+console.log(`NOTICE one:       ${JSON.stringify(writeNotice(oneBullet))}`);
+check(
+	"a one-bullet note says one subject and no \u201cmore\u201d",
+	writeNotice(oneBullet),
+	"saved 1 line: Compaction is the only trigger\u2026",
+);
+
+// Awkward: a bullet that spans lines, one that is a single unbreakable token,
+// one carrying ANSI, and one that is pure punctuation.
+const awkward = [
+	"- \u001b[31mred\u001b[0m alert: the widget must render exactly one line",
+	"-   ",
+	"- ---",
+	"- supercalifragilisticexpialidociousandthensomemoreletters follows",
+	"- A bullet whose text\twraps onto a second line",
+	"  because the model wrote it that way.",
+].join("\n");
+const awkwardNotice = writeNotice(awkward);
+console.log(`NOTICE awkward:   ${JSON.stringify(awkwardNotice)}`);
+check(
+	"awkward bullets still yield clean subjects",
+	awkwardNotice,
+	"saved 5 lines: red alert: the widget must render\u2026; supercalifragilisticexpialidocious\u2026 (+1 more)",
+);
+check("no ANSI escape reaches the notification", /\u001b/.test(awkwardNotice), false);
+check(
+	"no control character reaches the notification",
+	/[\u0000-\u001f\u007f]/.test(awkwardNotice),
+	false,
+);
+
+// Empty / subject-less input must fall back to the counts it replaced, never to
+// a half-built sentence.
+console.log(`NOTICE empty:     ${JSON.stringify(writeNotice(""))}`);
+check("an empty note degrades to counts", writeNotice(""), "wrote 0 note lines");
+check(
+	"a note with no legible subject degrades to counts",
+	writeNotice("- ---\n- ***"),
+	"wrote 2 note lines",
+);
+
+// A kill is otherwise invisible: the fact is gone from the bank and nothing in
+// the UI ever said so.
+const withKills = writeNotice(normalNote, 2);
+console.log(`NOTICE kills:     ${JSON.stringify(withKills)}`);
+check("invalidations are surfaced", withKills.endsWith(" \u00b7 2 facts retired"), true);
+check(
+	"one kill is singular",
+	writeNotice(oneBullet, 1).endsWith(" \u00b7 1 fact retired"),
+	true,
+);
+check(
+	"kills survive the degraded path",
+	writeNotice("", 3),
+	"wrote 0 note lines \u00b7 3 facts retired",
+);
+check("no kills, no suffix", writeNotice(normalNote, 0).includes("retired"), false);
+
+// It is a notification, not a report.
+for (const [label, notice] of [
+	["normal", writeNotice(normalNote, 2)],
+	["awkward", awkwardNotice],
+	["long", writeNotice(`- ${"word ".repeat(200)}\n- ${"x".repeat(400)}`, 9)],
+] as const) {
+	check(`${label}: single line`, notice.includes("\n"), false);
+	check(`${label}: stays short`, notice.length <= 120, true);
+}
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 if (failures > 0) process.exit(1);
