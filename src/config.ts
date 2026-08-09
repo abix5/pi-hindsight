@@ -57,9 +57,9 @@ export interface HindsightConfig {
 	deepRecallQueries: number;
 	/** Judged facts fed to the deep pass synthesis (wider than an ordinary turn's inject cap). */
 	deepRecallMaxLines: number;
-	/** Inject the short "the bank exists, ask it" reminder at session start and every N turns. */
+	/** Inject the short "the bank exists, ask it" reminder after N turns with no memory block. */
 	bankReminder: boolean;
-	/** Turns between reminders. Too small pollutes context, too large and the tools are forgotten. */
+	/** Turns of memory silence between reminders. Too small pollutes context, too large and the tools are forgotten. */
 	bankReminderTurns: number;
 	/**
 	 * Fact-category configurator for the memorize contour. Loose shape:

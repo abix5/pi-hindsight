@@ -208,6 +208,11 @@ export default function (pi: ExtensionAPI) {
 
 	// Bank-reminder cadence, same per-instance/per-session discipline as `task`.
 	const reminder = newReminderState();
+	// Explicit hand-off between the two before_agent_start handlers below. The
+	// runner awaits handlers in registration order, so the recall one has already
+	// decided by the time the reminder one runs: an injected recall block IS the
+	// tools being mentioned, and the reminder must not stack a nudge on top of it.
+	let recallInjected = false;
 	// Last successful stats poll, so the reminder can say how big the bank is
 	// without a request of its own — it must never touch the network.
 	let bankCounts: { documents: number; facts: number } | undefined;
@@ -457,6 +462,7 @@ export default function (pi: ExtensionAPI) {
 	// hanging the turn start forever.
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (standDown) return;
+		recallInjected = false; // this turn, until proven otherwise below
 		appendDebug(ctx.cwd ?? process.cwd(), "event.before_agent_start", {
 			promptChars: event.prompt.length,
 			autoRecall: cfg?.autoRecall,
@@ -504,7 +510,8 @@ export default function (pi: ExtensionAPI) {
 				injectedText: recall.text,
 				rawHits: recall.rawHits,
 			});
-			if (recall.queried && recall.text)
+			if (recall.queried && recall.text) {
+				recallInjected = true;
 				return {
 					message: {
 						customType: "mem-recall",
@@ -512,6 +519,7 @@ export default function (pi: ExtensionAPI) {
 						display: true,
 					},
 				};
+			}
 		} catch (err) {
 			appendDebug(cwd, "event.before_agent_start.error", {
 				error: (err as Error).message,
@@ -526,8 +534,8 @@ export default function (pi: ExtensionAPI) {
 
 	// Periodic nudge that the bank exists and can be queried deliberately. Its own
 	// handler on purpose: the runner collects a message from EVERY before_agent_start
-	// handler, so the reminder stays independent of whether recall found anything —
-	// and it is pure local string work, so it adds nothing to the hot path.
+	// handler, so it can still fire on turns where recall stayed silent — and it is
+	// pure local string work, so it adds nothing to the hot path.
 	pi.on("before_agent_start", async (_event, ctx) => {
 		if (standDown || !cfg) return;
 		const due = reminderDue(reminder, ctx.sessionManager?.getSessionId?.(), {
@@ -535,6 +543,7 @@ export default function (pi: ExtensionAPI) {
 			everyTurns: cfg.bankReminderTurns,
 			active: cfg.active,
 			autoRecall: runtime.autoRecall,
+			recalled: recallInjected,
 		});
 		if (!due) return;
 		return {

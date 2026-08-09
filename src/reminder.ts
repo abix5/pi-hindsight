@@ -6,33 +6,48 @@
  * and an unremembered tool is a dead tool. So a short nudge rides along at
  * session start and every N turns after that.
  *
- * Deliberately a blind turn counter, NOT a reset on the task-detector's
- * boundary: forgetting is a function of turns since the tools were last
- * mentioned, not of task identity, and a boundary already injects a visible
- * mem-recall briefing that reminds the model by itself. Coupling the two would
- * fire the reminder most often exactly where it is least needed, and make the
- * cadence depend on a probabilistic component.
+ * Forgetting is a function of turns since the tools were last MENTIONED, not of
+ * task identity — so the counter is not reset on the task-detector's boundary.
+ * But an injected mem-recall block is itself a visible mention: it names the
+ * bank and its tools in the same turn. Counting such a turn as silent would
+ * stack a nudge on top of a briefing — loudest exactly where it is least
+ * needed, which is what a fixed modulo did. So the counter measures CONSECUTIVE
+ * turns with NO memory block, and a recall block re-arms it.
+ *
+ * A fresh session starts at "never mentioned", so the first turn on which recall
+ * stays silent still gets the opening nudge: a session where memory never spoke
+ * is precisely the one where the tools are invisible.
  */
 
 /** Turn counter for one session. Extension memory, never the session file. */
 export interface ReminderState {
 	sessionId?: string;
-	turns: number;
+	/** Consecutive turns with no memory block. `NEVER` = none seen yet. */
+	silent: number;
 }
 
+/** "The tools were never mentioned in this session" — always past any interval. */
+const NEVER = Number.MAX_SAFE_INTEGER;
+
 export function newReminderState(): ReminderState {
-	return { turns: 0 };
+	return { silent: NEVER };
 }
 
 export interface ReminderGate {
 	/** `bankReminder` config key. */
 	enabled: boolean;
-	/** `bankReminderTurns`: fire on turn 0, then every N turns. */
+	/** `bankReminderTurns`: fire after N consecutive turns with no memory block. */
 	everyTurns: number;
 	/** A bank is declared for this project (dormant plugin ⇒ nothing to remind about). */
 	active: boolean;
 	/** Runtime auto-recall switch; off means the user asked memory to stay quiet. */
 	autoRecall: boolean;
+	/**
+	 * THIS turn injected a visible recall block. Passed in explicitly by the
+	 * caller — the recall handler runs before the reminder handler, so whether it
+	 * injected is a known fact by then, not something to guess at from state.
+	 */
+	recalled: boolean;
 }
 
 /**
@@ -51,11 +66,17 @@ export function reminderDue(
 	if (gate.everyTurns < 1) return false;
 	if (state.sessionId !== sessionId) {
 		state.sessionId = sessionId;
-		state.turns = 0;
+		state.silent = NEVER;
 	}
-	const due = state.turns % gate.everyTurns === 0;
-	state.turns += 1;
-	return due;
+	// The agent just saw a memory block: the tools are mentioned, start over.
+	if (gate.recalled) {
+		state.silent = 0;
+		return false;
+	}
+	if (state.silent < NEVER) state.silent += 1;
+	if (state.silent < gate.everyTurns) return false;
+	state.silent = 0;
+	return true;
 }
 
 /**

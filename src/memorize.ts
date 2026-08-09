@@ -99,6 +99,89 @@ function countBullets(note: string): number {
 	return bullets || lines.filter(Boolean).length;
 }
 
+/** Longest a single subject may be before it is cut on a word boundary. */
+const SUBJECT_MAX = 34;
+/** How many subjects the one-line notice names before it says "+N more". */
+const SUBJECT_COUNT = 2;
+
+/**
+ * Reduce one note line to its subject: the opening words, which is where a
+ * distilled bullet names what it is about.
+ *
+ * Everything a terminal must never see is stripped here, because the result
+ * lands in `ctx.ui.notify` — the TUI passes it through `theme.fg("dim", …)` into
+ * ONE status Text node, and RPC clients get it as a single JSON string they are
+ * free to render on one line. So: ANSI first (the escape AND its payload), then
+ * every control char including newlines and tabs, then markdown noise.
+ * Returns "" when nothing legible survives — the caller degrades to counts.
+ */
+function lineSubject(raw: string): string {
+	const flat = raw
+		.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, "") // CSI escapes, payload included
+		.replace(/[\u0000-\u001f\u007f]+/g, " ") // newlines, tabs, stray ESC
+		.replace(/^\s*[-*\u2022]\s*/, "") // bullet marker
+		.replace(/^#{1,6}\s*/, "") // heading marker
+		.replace(/[`*_]+/g, "") // markdown emphasis / code ticks
+		.replace(/\s+/g, " ")
+		.trim();
+	// A line of punctuation, a bare separator, or a fragment too short to mean
+	// anything is not a subject — say so instead of printing garbage.
+	if (flat.length < 4 || !/[\p{L}\p{N}]/u.test(flat)) return "";
+	if (flat.length <= SUBJECT_MAX) return flat;
+	const cut = flat.slice(0, SUBJECT_MAX);
+	const space = cut.lastIndexOf(" ");
+	const kept = space > SUBJECT_MAX / 2 ? cut.slice(0, space) : cut;
+	// Trailing punctuation before an ellipsis reads as a typo.
+	return `${kept.replace(/[\s,;:.\u2013\u2014-]+$/, "")}\u2026`;
+}
+
+/** Subjects of a note's bullets (or of its plain lines when it has no bullets). */
+function noteSubjects(note: string): string[] {
+	const lines = note
+		.split("\n")
+		.map((l) => l.trim())
+		.filter(Boolean);
+	const bullets = lines.filter((l) => /^[-*\u2022]/.test(l));
+	// No bullets at all: fall back to plain lines, minus the heading labels the
+	// extract prompt puts above them ("## Decisions:") — those name a category, not
+	// a subject.
+	const source = bullets.length
+		? bullets
+		: lines.filter((l) => !l.startsWith("#") && !/^[^.!?]{1,40}:$/.test(l));
+	const out: string[] = [];
+	for (const line of source) {
+		const subject = lineSubject(line);
+		if (subject && !out.includes(subject)) out.push(subject);
+	}
+	return out;
+}
+
+/** ` · N facts retired`, or nothing at all. Shared by both post-write notices. */
+function retiredSuffix(invalidated: number): string {
+	if (invalidated < 1) return "";
+	return ` \u00b7 ${invalidated} fact${invalidated === 1 ? "" : "s"} retired`;
+}
+
+/**
+ * The post-write notification line: WHAT went into the bank, not just how much.
+ *
+ * The document count it replaces was noise (the inline path always writes
+ * exactly one), and a line count alone never tells the user whether the right
+ * things were stored. The note is already distilled prose whose bullets name
+ * their own subjects, so the summary is derived from it — no extra model call.
+ * One short line: two subjects, then "+N more", then any kills.
+ */
+export function writeNotice(note: string, invalidated = 0): string {
+	const lines = countBullets(note);
+	const subjects = noteSubjects(note);
+	const tail = retiredSuffix(invalidated);
+	if (subjects.length === 0) return `wrote ${lines} note lines${tail}`;
+	const shown = subjects.slice(0, SUBJECT_COUNT);
+	const rest = subjects.length - shown.length;
+	const more = rest > 0 ? ` (+${rest} more)` : "";
+	return `saved ${lines} line${lines === 1 ? "" : "s"}: ${shown.join("; ")}${more}${tail}`;
+}
+
 /**
  * Append one dispatch-log record (docId → memorize window) as a single O_APPEND
  * write. Best-effort: a single small `JSON.stringify(...) + "\n"` write is atomic
@@ -575,6 +658,9 @@ export class Memorizer {
 		// knows on this note's topic and drop bullets already stored anywhere.
 		// This recall is a plain HTTP call (client.recall) — it creates NO
 		// conversation turn, so the pipeline stays invisible / off-conversation.
+		// Declared out here because the dedup block can return early ("blocked") and
+		// a kill that already happened must still reach the user.
+		let invalidated = 0;
 		try {
 			const noteCharsBefore = note.length;
 			appendDebug(cwd, "memorize.dedup.start", { noteCharsBefore });
@@ -641,7 +727,7 @@ export class Memorizer {
 			// The SAME recalled facts feed the third verdict. Run it before the prose
 			// dedup: a note that turns out fully duplicate returns early below, and
 			// that is exactly the run where the bank is most likely holding orphans.
-			await this.invalidateOrphans(ctx, chain, facts, deltaText);
+			invalidated = await this.invalidateOrphans(ctx, chain, facts, deltaText);
 			if (facts.length === 0) {
 				// Bank knows nothing on this topic → nothing to dedup against. Keep the
 				// note unchanged (do NOT spend a model call).
@@ -673,7 +759,10 @@ export class Memorizer {
 						documents: 0,
 						lines: 0,
 					});
-					this.notify(ctx, "memory skipped: everything already in the bank");
+					this.notify(
+						ctx,
+						`memory skipped: everything already in the bank${retiredSuffix(invalidated)}`,
+					);
 					return "blocked";
 				}
 				note = deduped;
@@ -748,7 +837,7 @@ export class Memorizer {
 			lines,
 			documentText: note,
 		});
-		this.notify(ctx, `wrote ${documents} document · ${lines} note lines`);
+		this.notify(ctx, writeNotice(note, invalidated));
 		// Refresh the bank counters shown in the widget (best-effort).
 		try {
 			const s = await this.deps.client.stats(ctx.signal);
@@ -775,16 +864,19 @@ export class Memorizer {
 	 * Every failure here is swallowed. Invalidation is housekeeping on top of the
 	 * write; a bank that refuses a PATCH, a model that returns junk, or an
 	 * unverifiable quote must all end with the memory still stored.
+	 *
+	 * Returns how many facts were actually retired, so the post-write notification
+	 * can say so — the user has no other window onto a kill.
 	 */
 	private async invalidateOrphans(
 		ctx: ExtensionContext,
 		chain: ModelChain,
 		facts: RecallHit[],
 		deltaText: string,
-	): Promise<void> {
+	): Promise<number> {
 		const { cfg } = this.deps;
 		const cwd = ctx.cwd ?? process.cwd();
-		if (!cfg.factInvalidation) return;
+		if (!cfg.factInvalidation) return 0;
 		// Observations are derived and regenerate from their sources, so the server
 		// refuses to curate them (400). Offering one as a candidate would only waste
 		// a kill on a fact that comes straight back.
@@ -794,7 +886,7 @@ export class Memorizer {
 			candidates.push({ id: f.id, text: f.text });
 			if (candidates.length >= MAX_INVALIDATION_CANDIDATES) break;
 		}
-		if (candidates.length === 0) return;
+		if (candidates.length === 0) return 0;
 		// The verdict is only as good as the evidence, and the evidence must be
 		// QUOTED from this transcript. A delta too big for one window would arrive
 		// truncated, and a quote from the missing half is unverifiable — so skip the
@@ -805,7 +897,7 @@ export class Memorizer {
 				deltaChars: deltaText.length,
 				budget,
 			});
-			return;
+			return 0;
 		}
 		let raw: string;
 		try {
@@ -823,7 +915,7 @@ export class Memorizer {
 			appendDebug(cwd, "memorize.invalidate.model_error", {
 				error: (err as Error).message,
 			});
-			return;
+			return 0;
 		}
 		const kills = parseInvalidations(raw, {
 			allowedIds: candidates.map((c) => c.id),
@@ -834,11 +926,13 @@ export class Memorizer {
 			output: raw,
 			kills: kills.length,
 		});
+		let retired = 0;
 		for (const kill of kills) {
 			try {
 				// The quote IS the reason: the server stores it as invalidation_reason,
 				// so every kill stays auditable next to the fact it retired.
 				await this.deps.client.invalidate(kill.id, kill.quote, ctx.signal);
+				retired += 1;
 				appendDebug(cwd, "memorize.invalidate.done", { id: kill.id });
 			} catch (err) {
 				appendDebug(cwd, "memorize.invalidate.error", {
@@ -847,5 +941,6 @@ export class Memorizer {
 				});
 			}
 		}
+		return retired;
 	}
 }

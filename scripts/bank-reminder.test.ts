@@ -2,8 +2,9 @@
  * Self-test for the bank-reminder cadence (run with bun or node).
  *   bun scripts/bank-reminder.test.ts
  *
- * Covers the whole risk of this feature: it must fire at session start, again
- * after N turns, never in between, and never at all when the user switched
+ * Covers the whole risk of this feature: it must fire at session start when
+ * memory itself stayed silent, again after N silent turns, never on a turn that
+ * already carries a recall block, and never at all when the user switched
  * auto-recall off or the project has no declared bank.
  */
 
@@ -29,28 +30,63 @@ const live = {
 	everyTurns: 10,
 	active: true,
 	autoRecall: true,
+	recalled: false,
 };
 
-/** Fire pattern over `turns` consecutive turns of one session. */
+/**
+ * Fire pattern over `turns` consecutive turns of one session.
+ * `recallOn(i)` says whether turn i injected a visible recall block.
+ */
 function pattern(
 	turns: number,
 	gate = live,
 	sessionId: string | undefined = "s1",
+	recallOn: (turn: number) => boolean = () => false,
 ): number[] {
 	const state = newReminderState();
 	const fired: number[] = [];
 	for (let i = 0; i < turns; i += 1)
-		if (reminderDue(state, sessionId, gate)) fired.push(i);
+		if (reminderDue(state, sessionId, { ...gate, recalled: recallOn(i) }))
+			fired.push(i);
 	return fired;
 }
 
-check("fires at session start, then every N turns", pattern(25), [0, 10, 20]);
+check("fires at session start, then every N silent turns", pattern(25), [
+	0, 10, 20,
+]);
 
 check("does not fire in between", pattern(10).length, 1);
 
 check("a shorter interval is honored", pattern(10, { ...live, everyTurns: 3 }), [
 	0, 3, 6, 9,
 ]);
+
+// Defect 1: the old modulo fired on turn 0 — the very turn the task detector
+// calls a boundary and injects a deep-recall briefing. A recall block IS the
+// tools being mentioned, so that turn must stay quiet.
+check(
+	"silent on a turn that already injected a recall block",
+	pattern(1, live, "s1", () => true),
+	[],
+);
+
+check(
+	"a recall block on turn 0 delays the nudge by a full interval",
+	pattern(25, live, "s1", (i) => i === 0),
+	[10, 20],
+);
+
+check(
+	"a recall block mid-cadence re-arms the counter",
+	pattern(30, live, "s1", (i) => i === 5),
+	[0, 15, 25],
+);
+
+check(
+	"a session where recall never stays silent never gets a nudge",
+	pattern(50, live, "s1", () => true),
+	[],
+);
 
 check("silent when auto-recall is off", pattern(30, { ...live, autoRecall: false }), []);
 
@@ -79,6 +115,23 @@ check(
 	for (let i = 0; i < 5; i += 1) reminderDue(state, "s1", live);
 	check("a new session fires at its start", reminderDue(state, "s2", live), true);
 	check("and then goes quiet again", reminderDue(state, "s2", live), false);
+}
+
+// The counter belongs to the session, not to the run of turns: a new session
+// whose first turn carries a recall block is silent, and its cadence restarts
+// from that block rather than from whatever the previous session was owed.
+{
+	const state = newReminderState();
+	for (let i = 0; i < 9; i += 1) reminderDue(state, "s1", live);
+	check(
+		"a new session that opens with recall stays quiet",
+		reminderDue(state, "s2", { ...live, recalled: true }),
+		false,
+	);
+	const after: number[] = [];
+	for (let i = 0; i < 11; i += 1)
+		if (reminderDue(state, "s2", live)) after.push(i);
+	check("and counts its silent turns from that block", after, [9]);
 }
 
 const text = reminderText("my-bank", { documents: 12, facts: 300 });
