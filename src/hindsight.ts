@@ -234,14 +234,23 @@ export class HindsightClient {
 		}
 	}
 
-	/** POST /v1/{ns}/banks/{bank}/reflect — Hindsight synthesized answer. */
+	/**
+	 * POST /v1/{ns}/banks/{bank}/reflect — Hindsight synthesized answer.
+	 *
+	 * Timed out at 30s, reflect had never once succeeded in production: measured
+	 * across four banks it takes 28-59s, and the curve is flat in bank size (a
+	 * 10-fact bank still answers in 28s) because it is an LLM-bound agent loop,
+	 * not a retrieval problem. This ceiling is for the DELIBERATE `hindsight_reflect`
+	 * tool call, where the agent chose to wait; automatic callers stay bounded by
+	 * their own, much shorter, abort ceiling.
+	 */
 	async reflect(query: string, signal?: AbortSignal): Promise<unknown> {
 		return this.request(
 			"POST",
 			`${this.bankBase()}/reflect`,
 			{ query },
 			signal,
-			30000,
+			180000,
 		);
 	}
 
