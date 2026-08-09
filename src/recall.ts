@@ -5,9 +5,8 @@ import type { HindsightConfig, RecallEffort } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug } from "./log.ts";
 import { type ModelChain, runModel } from "./model.ts";
-import { QUERY_BUILDER, RECALL_JUDGE } from "./prompts.ts";
+import { DEEP_SYNTHESIS, QUERY_BUILDER, RECALL_JUDGE } from "./prompts.ts";
 import {
-	directAnswer,
 	extractHits,
 	heuristicQueries,
 	normalizeLine,
@@ -57,6 +56,23 @@ export interface RecallInjectResult {
 	queried: boolean;
 	reason: string;
 	rawHits: string[];
+	/** True when `text` is the deep pass's synthesized briefing, not a bullet list. */
+	synthesized?: boolean;
+}
+
+/**
+ * The deep pass, run only at a task boundary: wider recall driven by the task
+ * detector's query, then ONE synthesis call over the facts the judge kept.
+ *
+ * Deliberately NOT `POST /reflect`: measured on four banks it takes 28-59s and
+ * the curve is flat in bank size (a 10-fact bank answers in 28s) because it is
+ * an LLM-bound agent loop. Our own recall + one cheap completion is seconds.
+ */
+export interface DeepPass {
+	/** Bank query from the detector's verdict; empty for the deterministic triggers. */
+	query?: string;
+	/** Short task title, for the debug log. */
+	title?: string;
 }
 
 function emptyRecall(): RecallInjectResult {
@@ -201,15 +217,19 @@ export async function runRecall(
 	chain: ModelChain,
 	prompt: string,
 	signal?: AbortSignal,
+	deep?: DeepPass,
 ): Promise<RecallInjectResult> {
 	const cwd = ctx.cwd ?? process.cwd();
-	const eff = effortPlan(cfg.recallEffort);
+	const eff = deep
+		? { queries: Math.max(1, cfg.deepRecallQueries) }
+		: effortPlan(cfg.recallEffort);
 	appendDebug(cwd, "recall.gate.start", {
 		promptChars: prompt.length,
 		model: chain.label,
 		effort: cfg.recallEffort,
 		maxQueries: eff.queries,
 		filter: cfg.recallFilter,
+		deep: deep?.query,
 	});
 	// The query builder is what makes recall work: it rewrites the user's message
 	// into standalone bank queries. When EVERY model in the chain is down we must
@@ -255,6 +275,20 @@ export async function runRecall(
 			degraded = true;
 		}
 	}
+	// The detector already named the subject, so the deep pass always queries —
+	// even when the builder gated out or every model was down. Its query goes
+	// FIRST so it survives the per-query cap.
+	if (deep) {
+		const queries = [
+			...new Set([deep.query ?? "", ...plan.queries].map((q) => q.trim())),
+		].filter(Boolean);
+		plan = {
+			shouldQuery: queries.length > 0,
+			op: "recall",
+			queries,
+			reason: plan.reason,
+		};
+	}
 	appendDebug(cwd, "recall.gate.plan", { ...plan, degraded });
 	if (!plan.shouldQuery)
 		return {
@@ -264,42 +298,12 @@ export async function runRecall(
 
 	const queryLabel = plan.queries.join(" | ");
 	const seen = seenInjectedFacts(ctx);
-	const cap = Math.max(1, cfg.recallMaxQueries);
-
-	if (plan.op === "reflect") {
-		// reflect composes a single answer from the bank's own context.
-		const q = plan.queries[0];
-		appendDebug(cwd, "recall.reflect.start", { query: q });
-		const res = await client.reflect(q, signal);
-		appendDebug(cwd, "recall.reflect.done", { response: res });
-		const answer = directAnswer(res);
-		if (answer)
-			return {
-				...emptyRecall(),
-				found: 1,
-				injected: 1,
-				text: answer,
-				query: q,
-				operation: "reflect",
-				queried: true,
-				reason: "bank reflected",
-			};
-		const hits = dedupeHits(extractHits(res)).filter(
-			(h) => !seen.has(normalizeLine(h.text)),
-		);
-		const kept = hits.slice(0, cfg.recallMaxLines);
-		return {
-			...emptyRecall(),
-			found: hits.length,
-			injected: kept.length,
-			text: kept.map((h) => `- ${h.text}`).join("\n"),
-			query: q,
-			operation: "reflect",
-			queried: true,
-			reason: kept.length ? "bank recalled facts" : "bank returned no facts",
-			rawHits: hits.map((h) => h.text),
-		};
-	}
+	const cap = deep
+		? Math.max(1, cfg.deepRecallQueries)
+		: Math.max(1, cfg.recallMaxQueries);
+	const maxLines = deep
+		? Math.max(1, cfg.deepRecallMaxLines)
+		: cfg.recallMaxLines;
 
 	// Each query is an independent recall: its own bank call and its own verdict,
 	// all in flight at once. Merging only afterwards is what lets a junk query be
@@ -340,7 +344,7 @@ export async function runRecall(
 		skippedSeen,
 	});
 
-	const finalHits = merged.slice(0, cfg.recallMaxLines);
+	const finalHits = merged.slice(0, maxLines);
 	if (finalHits.length === 0) {
 		let reason = "recalled facts judged irrelevant";
 		if (totalFound === 0) reason = "bank returned no facts";
@@ -355,17 +359,55 @@ export async function runRecall(
 			reason,
 		};
 	}
-	const text = finalHits.map((h) => `- ${h.text}`).join("\n");
+	const bullets = finalHits.map((h) => `- ${h.text}`).join("\n");
+	const text = deep
+		? await synthesize(ctx, chain, prompt, bullets, signal)
+		: bullets;
 	return {
 		found: totalFound,
 		injected: finalHits.length,
 		skippedSeen,
 		skippedFiltered: merged.length - finalHits.length,
-		text,
+		text: text || bullets,
 		query: queryLabel,
 		operation: plan.op,
 		queried: true,
 		reason: degraded ? `${plan.reason} (degraded)` : "bank recalled facts",
 		rawHits: merged.map((h) => h.text),
+		synthesized: Boolean(deep && text && text !== bullets),
 	};
+}
+
+/**
+ * One cheap completion that turns the kept facts into a coherent briefing.
+ * Returns "" when it cannot help, so the caller falls back to the bullet list —
+ * a boundary turn must degrade to today's behaviour, never to nothing.
+ */
+async function synthesize(
+	ctx: ExtensionContext,
+	chain: ModelChain,
+	prompt: string,
+	bullets: string,
+	signal?: AbortSignal,
+): Promise<string> {
+	const cwd = ctx.cwd ?? process.cwd();
+	try {
+		const raw = await runModel(
+			ctx,
+			chain,
+			DEEP_SYNTHESIS,
+			`TASK:\n${prompt}\n\nFACTS:\n${bullets}`,
+			{ maxTokens: 600, signal },
+		);
+		const text = raw.trim();
+		appendDebug(cwd, "recall.synthesis", { chars: text.length });
+		if (!text || /^NONE\b/i.test(text)) return "";
+		return text;
+	} catch (err) {
+		if (signal?.aborted) throw err;
+		appendDebug(cwd, "recall.synthesis.error", {
+			error: (err as Error).message,
+		});
+		return "";
+	}
 }

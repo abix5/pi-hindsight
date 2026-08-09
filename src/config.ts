@@ -47,6 +47,16 @@ export interface HindsightConfig {
 	recallEffort: RecallEffort;
 	/** Hard safety bound on bank queries per recall, applied on top of the effort. */
 	recallMaxQueries: number;
+	/** Run the task-change detector (a cheap parallel LLM pass) and the deep pass it triggers. */
+	taskDetect: boolean;
+	/** Cap on detector history turns, so a task that never changes cannot grow the prefix forever. */
+	taskHistoryTurns: number;
+	/** How many past task titles stay in the detector prompt so a RETURN is not read as a new task. */
+	taskTitleTail: number;
+	/** Bank queries the deep pass may run (wider than an ordinary turn). */
+	deepRecallQueries: number;
+	/** Judged facts fed to the deep pass synthesis (wider than an ordinary turn's inject cap). */
+	deepRecallMaxLines: number;
 	/**
 	 * Fact-category configurator for the memorize contour. Loose shape:
 	 * `{ <key>: "on"|"off"|"ban", custom?: CustomCategory[] }`. Parsed by categories.ts.
@@ -160,6 +170,11 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"recallOperation",
 	"recallEffort",
 	"recallMaxQueries",
+	"taskDetect",
+	"taskHistoryTurns",
+	"taskTitleTail",
+	"deepRecallQueries",
+	"deepRecallMaxLines",
 	"factCategories",
 	"recallFilter",
 	"recallBudget",
@@ -248,6 +263,11 @@ export function loadConfig(cwd: string): HindsightConfig {
 				: "recall",
 		recallEffort: parseEffort(process.env.HINDSIGHT_RECALL_EFFORT, "normal"),
 		recallMaxQueries: envInt("HINDSIGHT_RECALL_MAX_QUERIES", 8),
+		taskDetect: envBool("HINDSIGHT_TASK_DETECT", true),
+		taskHistoryTurns: envInt("HINDSIGHT_TASK_HISTORY_TURNS", 12),
+		taskTitleTail: envInt("HINDSIGHT_TASK_TITLE_TAIL", 8),
+		deepRecallQueries: envInt("HINDSIGHT_DEEP_RECALL_QUERIES", 5),
+		deepRecallMaxLines: envInt("HINDSIGHT_DEEP_RECALL_MAX_LINES", 24),
 		recallFilter:
 			process.env.HINDSIGHT_RECALL_FILTER === "off" ? "off" : "model",
 		recallBudget: (process.env.HINDSIGHT_RECALL_BUDGET as Budget) || "mid",

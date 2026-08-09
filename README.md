@@ -302,6 +302,11 @@ Then each project you want memory in just declares its bank:
 | `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (per-query LLM judge scores hits and drops junk) or `off` |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
 | `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent-context budget for query building (tool output excluded) |
+| `taskDetect` | `HINDSIGHT_TASK_DETECT` | `true` | Run the task-change detector and the deep pass it triggers (see below) |
+| `taskHistoryTurns` | `HINDSIGHT_TASK_HISTORY_TURNS` | `12` | Safety cap on detector history turns (normally truncated at task boundaries) |
+| `taskTitleTail` | `HINDSIGHT_TASK_TITLE_TAIL` | `8` | Past task titles kept in the detector prompt so a RETURN is not read as a new task |
+| `deepRecallQueries` | `HINDSIGHT_DEEP_RECALL_QUERIES` | `5` | Bank queries the deep pass may run |
+| `deepRecallMaxLines` | `HINDSIGHT_DEEP_RECALL_MAX_LINES` | `24` | Judged facts fed to the deep pass synthesis |
 | `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim) |
 | `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
 | `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
@@ -312,6 +317,36 @@ Then each project you want memory in just declares its bank:
 > The write pipeline runs entirely off-conversation via `retainModelId` — no
 > agent turn, no context pollution — and includes the bank-aware cross-document
 > dedup step. `recallModelId` / `retainModelId` can be the same model.
+
+### Task boundaries: one briefing instead of scattered facts
+
+Injecting a handful of loose facts on *every* turn measurably hurts: Hindsight's
+own benchmark of exactly that shape recorded 1.06 corrections per task against
+0.97 with no memory at all — scattered fragments break focus.
+
+So ordinary turns keep the cheap contour (query builder → bank → per-query judge
+→ up to `recallMaxLines` facts), and the expensive pass runs only at a **task
+boundary**. A separate cheap model keeps its own short conversation next to the
+main one — a digest of each answer (first sentence + files written) plus your
+message verbatim — and answers, per turn, whether the work has moved to a
+different subject. On a change the history is dropped, so what remains always
+describes the task in progress; the finished task's title joins a short tail so
+returning to a morning topic is recognised as a *return*.
+
+The deep pass fires on exactly three triggers: the detector said the task
+changed, the first turn of a session, and the first turn after a compaction. It
+runs a wider recall driven by the detector's query, judges each query's hits as
+usual, and then makes **one** cheap-model call that writes a coherent briefing —
+which is injected instead of the bullet list.
+
+`POST /reflect` is deliberately **not** used here: measured across four banks it
+takes 28–59s and the curve is flat in bank size (a 10-fact bank still answers in
+28s), because it is an LLM-bound agent loop. The `hindsight_reflect` tool stays
+available for the agent to call deliberately.
+
+The detector never lengthens an ordinary turn: it runs concurrently with the
+ordinary recall, and its verdict only decides which result is used. Set
+`taskDetect` to `false` to go back to plain per-turn recall.
 
 ### Turning the automatic contours off
 
