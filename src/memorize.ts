@@ -950,12 +950,24 @@ export class Memorizer {
 			kills: kills.length,
 		});
 		let retired = 0;
+		// What was killed, for the local log. A kill is the one memory action that
+		// destroys knowledge, and the server-side `invalidation_reason` is the only
+		// other record of it — which this package gives no view onto. Without the
+		// text here, "2 facts retired" tells a user something vanished but never what,
+		// so a wrong kill could neither be noticed nor reconstructed.
+		const byId = new Map(candidates.map((c) => [c.id, c.text]));
+		const killed: Array<{ id: string; quote: string; text: string }> = [];
 		for (const kill of kills) {
 			try {
 				// The quote IS the reason: the server stores it as invalidation_reason,
 				// so every kill stays auditable next to the fact it retired.
 				await this.deps.client.invalidate(kill.id, kill.quote, ctx.signal);
 				retired += 1;
+				killed.push({
+					id: kill.id,
+					quote: kill.quote,
+					text: byId.get(kill.id) ?? "",
+				});
 				appendDebug(cwd, "memorize.invalidate.done", { id: kill.id });
 			} catch (err) {
 				appendDebug(cwd, "memorize.invalidate.error", {
@@ -964,6 +976,8 @@ export class Memorizer {
 				});
 			}
 		}
+		if (killed.length > 0)
+			appendLog(cwd, cfg.logPath, { type: "invalidate", kills: killed });
 		return retired;
 	}
 }

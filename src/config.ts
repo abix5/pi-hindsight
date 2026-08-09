@@ -277,7 +277,10 @@ export function loadConfig(cwd: string): HindsightConfig {
 		bankReminderTurns: envInt("HINDSIGHT_BANK_REMINDER_TURNS", 5),
 		recallFilter:
 			process.env.HINDSIGHT_RECALL_FILTER === "off" ? "off" : "model",
-		factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", true),
+		// Default OFF for 0.4.0. A kill destroys knowledge and nothing in this
+		// package can undo one, so the mechanism ships opt-in for a version while it
+		// is proven on a real bank; the default flips once a restore path exists.
+		factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", false),
 		recallBudget: (process.env.HINDSIGHT_RECALL_BUDGET as Budget) || "mid",
 		autoMemorize: envBool("HINDSIGHT_AUTO_MEMORIZE", true),
 		autoRecall: envBool("HINDSIGHT_AUTO_RECALL", true),

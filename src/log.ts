@@ -16,7 +16,7 @@ export function setDebugEnabled(on: boolean): void {
 
 export type HindsightLogEntry = {
 	ts: string;
-	type: "recall" | "reflect" | "retain" | "error";
+	type: "recall" | "reflect" | "retain" | "invalidate" | "error";
 	user?: string;
 	query?: string;
 	operation?: "recall" | "reflect";
@@ -33,6 +33,13 @@ export type HindsightLogEntry = {
 	documentText?: string;
 	stage?: string;
 	message?: string;
+	/**
+	 * Facts retired as contradicted, with the transcript quote that condemned each
+	 * one. The id alone would be useless locally: once the row is invalidated the
+	 * bank stops returning it, so the text has to be captured here at kill time or
+	 * it is unrecoverable from this side.
+	 */
+	kills?: Array<{ id: string; quote: string; text: string }>;
 };
 
 function clip(value: unknown): unknown {

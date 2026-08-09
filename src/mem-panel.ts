@@ -106,7 +106,17 @@ function logRow(e: HindsightLogEntry, w: number): string {
 		return `↙ ${time(e.ts)} reflect ${oneLine(e.query, w)}`;
 	if (e.type === "recall")
 		return `↙ ${time(e.ts)} recall  ${e.injected ?? 0}/${e.found ?? 0}  ${oneLine(e.query, w)}`;
+	if (e.type === "invalidate") return retireRow(e, w);
 	return `! ${time(e.ts)} ${e.stage ?? "error"} ${oneLine(e.message, w)}`;
+}
+
+/**
+ * A kill is the only log entry that DESTROYS knowledge, so it gets its own row
+ * shape instead of falling through to the error line.
+ */
+function retireRow(e: HindsightLogEntry, w: number): string {
+	const n = e.kills?.length ?? 0;
+	return `\u2193 ${time(e.ts)} retire  ${n} fact${n === 1 ? "" : "s"}  ${oneLine(e.kills?.[0]?.text, w)}`;
 }
 
 function logDetail(e: HindsightLogEntry): string[] {
@@ -118,6 +128,16 @@ function logDetail(e: HindsightLogEntry): string[] {
 	if (e.documentText) out.push("Document sent to bank:", e.documentText, "");
 	if (e.rawHits?.length)
 		out.push("Raw hits:", ...e.rawHits.map((h, i) => `${i + 1}. ${h}`));
+	// Both halves matter: the fact that died, and the quote that condemned it.
+	// Showing only one leaves a kill unjudgeable after the fact.
+	if (e.kills?.length)
+		for (const k of e.kills)
+			out.push(
+				`Retired ${k.id}:`,
+				k.text || "(text unavailable)",
+				`Evidence: "${k.quote}"`,
+				"",
+			);
 	return out;
 }
 
