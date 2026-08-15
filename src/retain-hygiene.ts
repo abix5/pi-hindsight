@@ -28,6 +28,13 @@
  *    facts without it and 0% with it. (The old wording, "The note is written in
  *    ru", was a description, not an instruction, and steered nothing.)
  *
+ * The optional USER bank shares those two disciplines and nothing else. Its
+ * frame is its own (`userRetainContext` below): a cross-project fact about the
+ * person, handed to the extractor as "knowledge base of the software project X",
+ * comes back rewritten into a rule about that one repository — observed on the
+ * first live seeding of the user bank. Speaker and language stay; the project
+ * frame goes.
+ *
  * `metadata` is sent for the same reason twice over: it is fed into the
  * extraction prompt AND stored on every unit the document produces, so it comes
  * back with each recalled fact. Keep it to fields worth reading back later —
@@ -94,6 +101,62 @@ export function retainMetadata(
 	const meta: Record<string, string> = {
 		source: `pi-hindsight/${source}`,
 		project: p.project,
+		language: p.language,
+	};
+	if (p.session) meta.session = p.session;
+	return meta;
+}
+
+/** What a user-bank write knows about itself. It has no project, by design. */
+export interface UserRetainProvenance {
+	/** The one language this bank is kept in (`cfg.memoryLanguage`). */
+	language: string;
+	/** pi session that produced the note, when the path knows it. */
+	session?: string;
+	/**
+	 * Accepted so a caller may pass a full `RetainProvenance`, and deliberately
+	 * ignored: naming a checkout here is exactly the defect this frame fixes.
+	 */
+	project?: string;
+}
+
+/**
+ * The `context` for one write into the optional user bank.
+ *
+ * Same two levers as `retainContext` — the speaker in the third person, and an
+ * imperative pinning the language — around a different frame. What is stored
+ * here is true of the PERSON in every repository they open, so the frame must
+ * not name one; see the module header for what happens when it does.
+ */
+export function userRetainContext(p: UserRetainProvenance): string {
+	return [
+		"Permanent profile of the person this AI coding assistant works with: one durable fact, decision, procedure or dead-end about how that person works, recorded the moment it was learned.",
+		"This knowledge holds across every project the person opens; it is not about one repository.",
+		"SPEAKER: the assistant's memory keeper, writing in the third person about the person it works with.",
+		"The AI coding assistant is NOT the speaker and no conversation is being reported, so nothing here is an experience of the assistant — every line is an established fact about the person or a standing preference of theirs.",
+		`LANGUAGE: write every extracted fact in ${p.language}, whatever language this note happens to be in. Keep code identifiers, paths and commands verbatim.`,
+	].join(" ");
+}
+
+/**
+ * The `metadata` for one user-bank write.
+ *
+ * `scope: "user"` stands where the project write puts `project`. Every metadata
+ * key is fed to the extractor and comes back attached to each recalled fact, so
+ * `project: <current checkout>` would assert the opposite of what this bank is
+ * for: the knowledge is deliberately not bound to the checkout that happened to
+ * be open when it was learned. `scope` says the one true thing instead.
+ *
+ * `source` is its own value rather than `agent-note`, because this is a fourth
+ * write path: if the quality of these records ever drops, the label has to name
+ * one writer, not two.
+ */
+export function userRetainMetadata(
+	p: UserRetainProvenance,
+): Record<string, string> {
+	const meta: Record<string, string> = {
+		source: "pi-hindsight/user-note",
+		scope: "user",
 		language: p.language,
 	};
 	if (p.session) meta.session = p.session;

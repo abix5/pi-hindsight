@@ -143,6 +143,22 @@ the same Russian note extracted **76% Cyrillic** facts through the old context
 and **0%** through the new one. (The old wording said *"The note is written in
 ru"* — a description, which steered nothing.)
 
+**Keep `memoryLanguage` in agreement with the server.** The extension's
+imperative is only one of the two voices in the room; the Hindsight server has
+its own language settings, and when they disagree they fight over every
+extraction:
+
+- `HINDSIGHT_API_LLM_OUTPUT_LANGUAGE` — forces the language of *all* LLM
+  artifacts the server produces.
+- `HINDSIGHT_API_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE` — the PostgreSQL
+  full-text-search dictionary, default `english`. A Russian bank must set it,
+  otherwise Russian facts are never stemmed and full-text search under-recalls.
+
+There is no way to check this automatically: `GET /v1/{ns}/banks/{bank}/config`
+returns 45 keys and no language key among them (verified against a live 0.9.1
+server), so the server's language settings are invisible to the extension.
+Keeping the three in agreement is left to you.
+
 The `metadata` is four fields, stored on every fact the document produces and
 returned with every recalled hit: `source` (which of the three write paths
 wrote it), `project`, `session`, and `language` (the language that was *asked*

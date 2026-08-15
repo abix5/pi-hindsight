@@ -14,9 +14,10 @@
  *      bank while `hindsight_retain` keeps writing to the PROJECT bank. Two
  *      addresses, proven on a stubbed transport — nothing here talks to a live
  *      bank;
- *   4. the two tools share one write hygiene (retain-hygiene.ts), because a
- *      second, drifting copy of the context/metadata is how a bank ends up
- *      bilingual;
+ *   4. the two tools share the hygiene module's two disciplines (speaker,
+ *      language imperative) but NOT one frame: the user note must not be
+ *      framed as the knowledge base of this checkout — that framing is what
+ *      rewrote a standing rule about the person into a rule about one repo;
  *   5. the AUTOMATIC write path cannot address the user bank at all. Not "does
  *      not today" — cannot: `src/memorize.ts` is handed one client and never
  *      learns the key. That guard is written against a FUTURE edit, so it names
@@ -371,31 +372,33 @@ await withExtension(configuredCwd, async (tools) => {
 		true,
 	);
 
-	// --- Scenario: Hygiene parity
-	// The user tool must reuse retain-hygiene.ts, not grow its own wording: the
-	// context is what pins the speaker and the LANGUAGE on the server side, and a
-	// second copy of it drifts the moment either is tuned.
+	// --- Scenario: Hygiene, but framed for a person
+	// The user tool keeps the hygiene module's two disciplines (speaker, language
+	// imperative) and NOT the project frame: a rule about the человек must not be
+	// extracted as a rule about this checkout. So the shared project helpers are
+	// exactly what it must NOT send.
 	const provenance = {
 		project: path.basename(configuredCwd),
 		language: LANGUAGE,
 	};
 	check(
-		"Hygiene parity: the user note carries the shared retain context",
-		userItem?.context,
-		retainContext("agent-note", provenance),
+		"Hygiene, but framed for a person: the user note does NOT carry the project retain context",
+		userItem?.context === retainContext("agent-note", provenance),
+		false,
 	);
 	check(
-		"Hygiene parity: the user note carries the shared retain metadata",
-		userItem?.metadata,
-		retainMetadata("agent-note", provenance),
+		"Hygiene, but framed for a person: the user note does NOT carry the project retain metadata",
+		JSON.stringify(userItem?.metadata) ===
+			JSON.stringify(retainMetadata("agent-note", provenance)),
+		false,
 	);
 	check(
-		"Hygiene parity: both tools send the same context",
+		"Hygiene, but framed for a person: the two tools no longer send the same context",
 		userItem?.context === projectItem?.context,
-		true,
+		false,
 	);
 	check(
-		"Hygiene parity: the user note is written in the configured memory language",
+		"Hygiene, but framed for a person: the user note is still written in the configured memory language",
 		typeof userItem?.context === "string" &&
 			userItem.context.includes(`write every extracted fact in ${LANGUAGE}`),
 		true,
