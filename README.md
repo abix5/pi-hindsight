@@ -331,6 +331,7 @@ Then each project you want memory in just declares its bank:
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `bankId` | `HINDSIGHT_BANK` | — (dormant) | Memory bank id; set it (or `"auto"`) to activate the plugin in a project |
+| `userBankId` | `HINDSIGHT_USER_BANK` | `""` (off) | Optional second bank for knowledge that holds across projects; when set, adds the `hindsight_retain_user` tool. Nothing is ever written here automatically. |
 | `baseUrl` | `HINDSIGHT_BASE_URL` | `http://localhost:8888` | Hindsight API base URL |
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
@@ -361,6 +362,12 @@ Then each project you want memory in just declares its bank:
 | `countsRefreshMs` | `HINDSIGHT_COUNTS_REFRESH_MS` | `20000` | Widget counter refresh interval |
 | `reviewAutoApproveDays` | `HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS` | `7` | Days a pending review entry waits before it is approved automatically; `0` disables expiry |
 | `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging (full prompts/bodies) — **may leak sensitive data** |
+
+> The **user bank** (`userBankId`) is for what stays true when you open a
+> completely different repository: standing instructions, preferences, goals,
+> prohibitions, habitual procedures. Only the `hindsight_retain_user` tool writes
+> to it; the automatic capture loop always writes the project bank and cannot
+> reach it.
 
 > The write pipeline runs entirely off-conversation via `retainModelId` — no
 > agent turn, no context pollution — and includes the bank-aware cross-document

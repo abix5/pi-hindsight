@@ -493,9 +493,38 @@ check(
 // extended — never weakened — when a new key is deliberately added, which is why
 // the review auto-approval window appears below: adding a key must be a visible
 // decision, not a silent drift of somebody else's default.
-const defaults = [...configSrc.matchAll(/env(?:Bool|Int)\("([A-Z_]+)",\s*([^)]+)\)/g)]
-	.map((m) => `${m[1]}=${m[2].trim()}`)
-	.sort();
+// The list covers two shapes, because a key that no shape matches is a key
+// nobody is watching: the numeric/boolean helpers, and an env-backed default of
+// the EMPTY STRING — which is how the optional user bank says "not connected".
+// The empty-string shape is matched loosely (the trim may sit inside or outside
+// the `??`, and a helper may wrap it) since what is frozen here is the DEFAULT,
+// not the expression that produces it. Local variables are skipped: activation
+// reads `process.env.HINDSIGHT_BANK?.trim() ?? ""` into a local, and that is a
+// lookup, not a default.
+function emptyStringDefaults(src: string): string[] {
+	const out: string[] = [];
+	const shapes = [
+		/process\.env\.([A-Z_]+)[^;\n]{0,40}?(?:\?\?|\|\|)\s*(?:""|'')/g,
+		/env[A-Za-z]*\("([A-Z_]+)",\s*(?:""|'')\)/g,
+	];
+	for (const shape of shapes)
+		for (const m of src.matchAll(shape)) {
+			const lineStart = src.lastIndexOf("\n", m.index ?? 0) + 1;
+			const line = src.slice(lineStart, (m.index ?? 0) + m[0].length);
+			if (/\b(?:const|let|var|return)\b/.test(line)) continue;
+			out.push(`${m[1]}=""`);
+		}
+	return out;
+}
+
+const defaults = [
+	...new Set([
+		...[
+			...configSrc.matchAll(/env(?:Bool|Int)\("([A-Z_]+)",\s*([^)]+)\)/g),
+		].map((m) => `${m[1]}=${m[2].trim()}`),
+		...emptyStringDefaults(configSrc),
+	]),
+].sort();
 check("No other default moves: every env-backed default is unchanged", defaults, [
 	"HINDSIGHT_AUTO_MEMORIZE=true",
 	"HINDSIGHT_AUTO_OFF=false",
@@ -516,6 +545,10 @@ check("No other default moves: every env-backed default is unchanged", defaults,
 	"HINDSIGHT_TASK_DETECT=true",
 	"HINDSIGHT_TASK_HISTORY_TURNS=12",
 	"HINDSIGHT_TASK_TITLE_TAIL=8",
+	// Added by the optional user bank: unset means the bank is not connected, so
+	// the whole feature is invisible. A silent drift of this default would
+	// connect a second bank behind the owner's back.
+	'HINDSIGHT_USER_BANK=""',
 ]);
 
 // ----------------------------------------------- Requirement: documentation

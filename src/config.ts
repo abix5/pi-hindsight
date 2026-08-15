@@ -21,6 +21,12 @@ export interface HindsightConfig {
 	namespace: string;
 	/** Memory bank id (one per project by default). */
 	bankId: string;
+	/**
+	 * Optional second bank holding what is true across projects (how the person
+	 * works, not what the code is). Empty = not wired: no client, no tool.
+	 * Never written automatically — only the explicit agent tool reaches it.
+	 */
+	userBankId: string;
 	/** Whether the plugin should run in this cwd (a bank was explicitly declared). */
 	active: boolean;
 	/** Legacy default model as "provider/id". Used as fallback. */
@@ -170,6 +176,7 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"baseUrl",
 	"namespace",
 	"bankId",
+	"userBankId",
 	"modelId",
 	"recallModelId",
 	"retainModelId",
@@ -263,6 +270,9 @@ export function loadConfig(cwd: string): HindsightConfig {
 		).replace(/\/+$/, ""),
 		namespace: process.env.HINDSIGHT_NAMESPACE ?? "default",
 		bankId: process.env.HINDSIGHT_BANK ?? defaultBankId(cwd),
+		// No cwd-derived fallback on purpose: a user bank is shared across projects,
+		// so guessing one from the folder name would be wrong by construction.
+		userBankId: process.env.HINDSIGHT_USER_BANK ?? "",
 		modelId: process.env.HINDSIGHT_MODEL || undefined,
 		recallModelId: process.env.HINDSIGHT_RECALL_MODEL || "openai/gpt-5.6-luna",
 		retainModelId: process.env.HINDSIGHT_RETAIN_MODEL || "openai/gpt-5.6-luna",
@@ -319,6 +329,11 @@ export function loadConfig(cwd: string): HindsightConfig {
 	// a scalar or malformed value must not crash the model resolver.
 	merged.recallModelChain = asStringList(merged.recallModelChain);
 	merged.retainModelChain = asStringList(merged.retainModelChain);
+	// Not slugified — unlike the project bank this id is typed by hand and must
+	// match the bank that exists on the server verbatim. Trimmed because the file
+	// layer supplies it too, and " " would otherwise mean a bank literally named
+	// with a space instead of "no user bank".
+	merged.userBankId = String(merged.userBankId ?? "").trim();
 	// Kill switch for spawned processes (workflow subtasks, subagents, CI). Config
 	// files normally win over env, but a project that opted INTO auto-recall must
 	// not be able to re-enable it inside a child process that was launched with
