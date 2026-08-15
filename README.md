@@ -171,11 +171,13 @@ log, so parallel pi sessions can write to it safely.
 A document nobody looks at for **7 days** is approved automatically, so the
 queue cannot grow without bound. That costs nothing in memory: approving never
 touched the bank in the first place — the document was stored the moment it was
-enqueued, and `d` is the only action that removes anything. The automatic
-approval is written into the log as its own kind of `done` event (marked
-`"by": "expiry"`), so the history still shows which entries a human actually
-confirmed. Change the window with `HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS`, or set
-it to `0` to keep everything pending until you review it by hand.
+enqueued, and `d` is the only action that removes anything. Every `done` event
+that no human caused is marked with a `by` field — `"expiry"` when the entry
+aged out, `"auto"` when there was nothing left to review (a malformed id, or a
+document the bank no longer has) — so an unmarked event, and only an unmarked
+one, means a person actually looked. Change the window with
+`HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS`, or set it to `0` to keep everything
+pending until you review it by hand.
 
 ### Pointers & `/mem-retain`
 

@@ -80,8 +80,9 @@ async function fetchWithTimeout(
 async function hydrate(p: PendingDoc): Promise<ReviewDoc | undefined> {
 	const base = safeBaseUrl(p.baseUrl);
 	// A malformed docId or bad baseUrl can never be actioned safely — drop it.
+	// Stamped `auto` so the audit trail does not later read as a human decision.
 	if (!base || !DOC_ID_RE.test(p.docId)) {
-		markDone(p.docId, "approved");
+		markDone(p.docId, "approved", "auto");
 		return undefined;
 	}
 	const coords = { ...p, baseUrl: base };
@@ -107,7 +108,8 @@ async function hydrate(p: PendingDoc): Promise<ReviewDoc | undefined> {
 	// missing an entry.
 	if (!res) return { ...shell, unreachable: true };
 	if (res.status === 404) {
-		markDone(p.docId, "approved"); // auto-drop: nothing stored / already gone
+		// Auto-drop: nothing stored / already gone. Nobody reviewed this either.
+		markDone(p.docId, "approved", "auto");
 		return undefined;
 	}
 	let doc: Record<string, unknown> = {};

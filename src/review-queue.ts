@@ -38,20 +38,34 @@ export interface AddEvent {
 	language?: string;
 }
 
+/**
+ * What ended a review, when it was not a person.
+ *
+ * `expiry` — the entry aged past the auto-approval window.
+ * `auto`   — there was nothing left to review: the document id was malformed,
+ *            or the bank answered 404 because the document is already gone.
+ *
+ * Both exist so that ABSENCE of the field means what it claims to mean. An
+ * earlier version recorded only `expiry`, and read absence as "a human pressed
+ * a key" — but the two automatic drops in review-docs.ts also wrote a bare
+ * `approved`, so absence quietly conflated a person with a housekeeping path.
+ */
+export type DoneBy = "expiry" | "auto";
+
 /** A "done" event: a document left the queue (approved or deleted). */
 export interface DoneEvent {
 	ev: "done";
 	docId: string;
 	action: "approved" | "deleted";
 	/**
-	 * Who ended the review. Absent = a human pressed a key; "expiry" = the entry
-	 * aged out. Deliberately an OPTIONAL extra field rather than a third `action`
-	 * value: `action` is an exhaustively-handled union everywhere it is consumed,
-	 * and widening it would silently change behaviour at every switch. An unknown
+	 * Who ended the review. Absent = a human acted; otherwise see `DoneBy`.
+	 * Deliberately an OPTIONAL extra field rather than a third `action` value:
+	 * `action` is an exhaustively-handled union everywhere it is consumed, and
+	 * widening it would silently change behaviour at every switch. An unknown
 	 * optional field is invisible to `foldEvents` and to every existing reader,
 	 * yet still tells a later human which entries nobody actually looked at.
 	 */
-	by?: "expiry";
+	by?: DoneBy;
 	ts: string;
 }
 
@@ -167,7 +181,7 @@ export function projectLanguage(projectDir: string): string {
 export function markDone(
 	docId: string,
 	action: "approved" | "deleted",
-	by?: "expiry",
+	by?: DoneBy,
 ): void {
 	try {
 		appendEvent({
