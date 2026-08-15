@@ -44,7 +44,7 @@ import {
 	readProjectOverrides,
 } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
-import { type HindsightLogEntry, readLog } from "./log.ts";
+import { type HindsightLogEntry, appendLog, readLog } from "./log.ts";
 import {
 	type ReviewDoc,
 	approveDoc,
@@ -107,6 +107,7 @@ function logRow(e: HindsightLogEntry, w: number): string {
 	if (e.type === "recall")
 		return `↙ ${time(e.ts)} recall  ${e.injected ?? 0}/${e.found ?? 0}  ${oneLine(e.query, w)}`;
 	if (e.type === "invalidate") return retireRow(e, w);
+	if (e.type === "restore") return restoreRow(e, w);
 	return `! ${time(e.ts)} ${e.stage ?? "error"} ${oneLine(e.message, w)}`;
 }
 
@@ -117,6 +118,16 @@ function logRow(e: HindsightLogEntry, w: number): string {
 function retireRow(e: HindsightLogEntry, w: number): string {
 	const n = e.kills?.length ?? 0;
 	return `\u2193 ${time(e.ts)} retire  ${n} fact${n === 1 ? "" : "s"}  ${oneLine(e.kills?.[0]?.text, w)}`;
+}
+
+/**
+ * The undo of a kill, drawn as its mirror image — same shape, arrow pointing back
+ * up — so a retire and its restore read as one movement when they sit next to
+ * each other in the list.
+ */
+function restoreRow(e: HindsightLogEntry, w: number): string {
+	const n = e.kills?.length ?? 0;
+	return `\u2191 ${time(e.ts)} restore ${n} fact${n === 1 ? "" : "s"}  ${oneLine(e.kills?.[0]?.text, w)}`;
 }
 
 function logDetail(e: HindsightLogEntry): string[] {
@@ -133,7 +144,7 @@ function logDetail(e: HindsightLogEntry): string[] {
 	if (e.kills?.length)
 		for (const k of e.kills)
 			out.push(
-				`Retired ${k.id}:`,
+				`${e.type === "restore" ? "Restored" : "Retired"} ${k.id}:`,
 				k.text || "(text unavailable)",
 				`Evidence: "${k.quote}"`,
 				"",
@@ -429,6 +440,48 @@ class MemPanel implements Component {
 		this.showLogDetail = false;
 	}
 
+	/**
+	 * Undo the kill the selected row records, for every fact in it at once.
+	 *
+	 * Row granularity, not per-fact: one log entry is one decision the write path
+	 * made about one delta, so the unit a user judges is the entry. Offering a
+	 * sub-selection would ask them to re-litigate a verdict they can already read in
+	 * the detail view.
+	 *
+	 * The undo is APPENDED, never subtracted — the original kill entry stays exactly
+	 * as written, because the point of that log is to show what the mechanism did,
+	 * including the parts that were reversed.
+	 */
+	private async restoreSelected(): Promise<void> {
+		const entry = this.log[this.logIndex];
+		const kills = entry?.type === "invalidate" ? entry.kills : undefined;
+		if (!kills?.length) return;
+
+		const restored: NonNullable<HindsightLogEntry["kills"]> = [];
+		let failure = "";
+		for (const k of kills) {
+			try {
+				await this.deps.client.restore(k.id);
+				restored.push(k);
+			} catch (err) {
+				// Stop at the first refusal: the bank is not answering, so the remaining
+				// ids would fail the same way. What did come back is still logged.
+				failure = (err as Error).message;
+				break;
+			}
+		}
+		if (restored.length)
+			appendLog(this.deps.cwd, this.deps.loadCfg().logPath, {
+				type: "restore",
+				kills: restored,
+			});
+		this.message = failure
+			? `restored ${restored.length}/${kills.length} — ${failure}`
+			: `restored ${restored.length} fact${restored.length === 1 ? "" : "s"}`;
+		this.refreshLog();
+		this.rerender();
+	}
+
 	private currentDoc(): ReviewDoc | undefined {
 		return this.docs[this.docIndex];
 	}
@@ -618,6 +671,7 @@ class MemPanel implements Component {
 
 	private logInput(data: string): void {
 		if (data === "r") this.refreshLog();
+		else if (data === "u") void this.restoreSelected();
 		else if (matchesKey(data, "enter"))
 			this.showLogDetail = !this.showLogDetail;
 		else if (matchesKey(data, "up"))
@@ -714,7 +768,7 @@ class MemPanel implements Component {
 		if (this.tab === "Review")
 			return `↑/↓ doc · PgUp/PgDn scroll · a approve · e edit · d delete · r reload · ${back}`;
 		if (this.tab === "Log")
-			return `↑/↓ entry · Enter details · r reload · ${back}`;
+			return `↑/↓ entry · Enter details · u restore · r reload · ${back}`;
 		return `r refresh · ${back}`;
 	}
 

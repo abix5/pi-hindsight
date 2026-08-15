@@ -272,6 +272,40 @@ export class HindsightClient {
 	}
 
 	/**
+	 * PATCH /v1/{ns}/banks/{bank}/memories/{id} — bring ONE retired fact back.
+	 *
+	 * The exact inverse of `invalidate`, verified against the live server (Hindsight
+	 * 0.9.0, `UpdateMemoryRequest`): `state: "valid"` and nothing else. `reason`
+	 * belongs to the kill and is deliberately not repeated here — it is the record of
+	 * why the fact died, not of why it came back, and resending it would overwrite
+	 * the audit trail the kill left behind.
+	 *
+	 * The same two rejections as the kill side are swallowed as no-ops, because a
+	 * restore is driven from a log entry that may be older than the bank:
+	 *   404 — the memory is gone for good (the document was deleted or reprocessed),
+	 *         so there is nothing to bring back and nothing to report;
+	 *   400 — the id is an OBSERVATION. Observations are derived and regenerate from
+	 *         their sources, so the server refuses to curate them either way.
+	 */
+	async restore(id: string, signal?: AbortSignal): Promise<void> {
+		try {
+			await this.request(
+				"PATCH",
+				`${this.bankBase()}/memories/${encodeURIComponent(id)}`,
+				{ state: "valid" },
+				signal,
+			);
+		} catch (err) {
+			if (
+				err instanceof HindsightError &&
+				(err.status === 404 || err.status === 400)
+			)
+				return;
+			throw err;
+		}
+	}
+
+	/**
 	 * POST /v1/{ns}/banks/{bank}/reflect — Hindsight synthesized answer.
 	 *
 	 * Timed out at 30s, reflect had never once succeeded in production: measured
