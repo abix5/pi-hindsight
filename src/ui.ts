@@ -110,13 +110,16 @@ export class HindsightStatus {
 		retired: 0,
 	};
 	/**
-	 * The user-profile block in the system prompt. `mode: "none"` means no user
-	 * bank was ever declared, and then the widget looks exactly as it did before
-	 * this feature existed — an unrelated project must not grow a new glyph.
+	 * The user-profile block in the system prompt. Untouched (`known: false`)
+	 * means no user bank was ever declared, and then the widget looks exactly as
+	 * it did before this feature existed — an unrelated project must not grow a
+	 * new glyph.
 	 */
 	private user = {
-		mode: "none" as "none" | "in" | "off" | "stale",
+		known: false,
+		injected: false,
 		facts: 0,
+		stale: false,
 	};
 
 	/** Point at the current UI (call on each event; the reference can change). */
@@ -227,31 +230,29 @@ export class HindsightStatus {
 
 	// --- user-profile block (system prompt) ---------------------------------
 	/**
-	 * The block is frozen into this epoch's prompt, carrying `facts` facts.
+	 * What the user block is doing right now: whether it is in this epoch's
+	 * system prompt, how many facts it carries, and whether the bank has since
+	 * moved past it.
 	 *
-	 * All three states say when the line will change, because the block is NOT
-	 * live: it is fixed for the epoch, so a user who edits the bank needs to know
-	 * that what they are looking at is last boundary's answer.
+	 * All three readings name WHEN the line can change, because the block is not
+	 * live — it is frozen for the epoch, so what the user sees is the answer from
+	 * the last boundary, and a fact written now lands at the next one.
 	 */
-	userBlockIn(facts: number): void {
-		this.user = { mode: "in", facts };
-		this.lastAction = { text: `≡ ${facts} facts in prompt`, tone: "dim" };
+	userBlock(state: {
+		injected: boolean;
+		facts: number;
+		stale: boolean;
+	}): void {
+		this.user = { known: true, ...state };
+		this.lastAction = { text: this.userLine(), tone: "dim" };
 		this.render();
 	}
-	/** This epoch injects nothing: no marker, no bank, or a failed first read. */
-	userBlockOff(): void {
-		this.user = { mode: "off", facts: 0 };
-		this.lastAction = { text: "≡ no user block", tone: "dim" };
-		this.render();
-	}
-	/** The bank moved under the frozen block; the prompt follows at the next boundary. */
-	userBlockStale(facts: number): void {
-		this.user = { mode: "stale", facts };
-		this.lastAction = {
-			text: `≡ ${facts} facts · update next epoch`,
-			tone: "dim",
-		};
-		this.render();
+
+	private userLine(): string {
+		if (!this.user.injected) return "≡ no user block";
+		return this.user.stale
+			? `≡ ${this.user.facts} facts · update next epoch`
+			: `≡ ${this.user.facts} facts in prompt`;
 	}
 
 	/**
@@ -261,16 +262,9 @@ export class HindsightStatus {
 	 * and "is my profile in the prompt" must stay answerable all turn.
 	 */
 	private userFrag(): string {
-		switch (this.user.mode) {
-			case "in":
-				return `≡${this.user.facts}`;
-			case "stale":
-				return `≡${this.user.facts}→`;
-			case "off":
-				return "≡–";
-			default:
-				return "";
-		}
+		if (!this.user.known) return "";
+		if (!this.user.injected) return "≡–";
+		return `≡${this.user.facts}${this.user.stale ? "→" : ""}`;
 	}
 
 	// --- memorize (write) ---------------------------------------------------
@@ -424,7 +418,7 @@ export class HindsightStatus {
 		const sizePlain = [`${counts}${kills}`, userFrag].filter(Boolean).join(" ");
 		const size = [
 			`${counts ? this.c("muted", counts) : ""}${kills ? this.c("warning", kills) : ""}`,
-			userFrag ? this.c(this.user.mode === "off" ? "dim" : "muted", userFrag) : "",
+			userFrag ? this.c(this.user.injected ? "muted" : "dim", userFrag) : "",
 		]
 			.filter(Boolean)
 			.join(" ");

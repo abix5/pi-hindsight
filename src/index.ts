@@ -260,6 +260,11 @@ export default function (pi: ExtensionAPI) {
 	// as this extension instance, so `/reload` correctly starts a fresh one.
 	let userBlock: string | undefined;
 	let userBlockFacts = 0;
+	// Raised by a write to the user bank inside the epoch: the frozen block and the
+	// bank have diverged. It changes nothing in the prompt — swapping the block in
+	// now is exactly the mid-epoch rewrite this design exists to avoid — but the
+	// user is owed the fact that what they just stored lands at the next boundary.
+	let userBlockStale = false;
 	// Rows the bank may return for the block. Generous next to the size ceiling that
 	// actually bounds it, so the ceiling — not the page size — decides what is kept.
 	const USER_BLOCK_LIMIT = 200;
@@ -287,8 +292,7 @@ export default function (pi: ExtensionAPI) {
 			const block = buildUserBlock(rows);
 			userBlock = block?.text;
 			userBlockFacts = block?.facts ?? 0;
-			if (block) status.userBlockIn(block.facts);
-			else status.userBlockOff();
+			userBlockStale = false; // the frozen block and the bank agree again
 			appendDebug(cwd, "userblock.epoch", {
 				reason,
 				rows: rows.length,
@@ -301,18 +305,17 @@ export default function (pi: ExtensionAPI) {
 				error: (err as Error).message,
 				kept: userBlockFacts,
 			});
-			if (userBlock) status.userBlockIn(userBlockFacts);
-			else status.userBlockOff();
 		}
 	};
 
-	// Raised by a successful write to the user bank: the frozen block and the bank
-	// have diverged, and the widget owes the user that fact. It changes nothing in
-	// the prompt — swapping the block in now is exactly the mid-epoch rewrite this
-	// whole design exists to avoid.
 	const onUserBankWrite = () => {
-		if (standDown) return;
-		status.userBlockStale(userBlockFacts);
+		if (standDown || !cfg?.userBankId) return;
+		userBlockStale = true;
+		status.userBlock({
+			injected: !!userBlock,
+			facts: userBlockFacts,
+			stale: true,
+		});
 	};
 
 	// Recall runs in `before_agent_start` so its result can be injected as a VISIBLE
@@ -517,8 +520,19 @@ export default function (pi: ExtensionAPI) {
 	// model chain resolves — and none of those should decide whether the person's
 	// standing facts are in the prompt.
 	pi.on("before_agent_start", async (event, _ctx) => {
-		if (standDown || !userBlock) return;
-		const next = applyUserBlock(event.systemPrompt ?? "", userBlock);
+		if (standDown || !cfg?.userBankId) return;
+		const next = userBlock
+			? applyUserBlock(event.systemPrompt ?? "", userBlock)
+			: undefined;
+		// The widget reports what actually happened to THIS prompt, not what was read
+		// at the boundary: a bank full of facts and instructions carrying no marker
+		// still means nothing is injected, and saying otherwise would be a lie the
+		// user cannot check.
+		status.userBlock({
+			injected: next !== undefined,
+			facts: userBlockFacts,
+			stale: userBlockStale,
+		});
 		// No marker in the instructions means no opinion about the prompt: returning
 		// nothing leaves the host's own string in place, byte for byte.
 		return next === undefined ? undefined : { systemPrompt: next };
