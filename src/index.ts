@@ -297,7 +297,14 @@ export default function (pi: ExtensionAPI) {
 		setDebugEnabled(cfg.debug);
 		// Retire the previous Memorizer before creating a new one.
 		memorizer?.dispose();
-		memorizer = new Memorizer({ pi, cfg, client, status });
+		// The automatic write path is handed a config with the user bank BLANKED
+		// out, so there is nothing there to address it with — the ban is structural,
+		// not a convention. Blanking the field beats narrowing MemorizeDeps to a
+		// subset type: the Memorizer reads a dozen config keys, and a narrower type
+		// would ripple through every helper signature in memorize.ts for the same
+		// guarantee.
+		const autoCfg: HindsightConfig = { ...cfg, userBankId: "" };
+		memorizer = new Memorizer({ pi, cfg: autoCfg, client, status });
 		// Gate the widget on activation: with no declared bank, keep the row hidden so
 		// unrelated projects are not cluttered by a memory widget.
 		if (cfg.active) status.setBank(cfg.bankId, cfg.baseUrl);
