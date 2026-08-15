@@ -459,10 +459,16 @@ for (
 	flagComment.unshift(configLines[i] ?? "");
 const flagCommentText = flagComment.join("\n");
 
+// The specification these assertions were written against said the flip was a
+// separate decision still pending. That decision has since been TAKEN by the
+// owner: a restore path shipped and the judge was watched making a correct kill
+// on the real bank, which were its two stated preconditions. So the contract
+// pinned here moved with it — the flag is on, and the comment must justify that
+// rather than promise a future decision.
 check(
-	"Comment and default after the change: the default is untouched",
+	"Comment and default after the change: invalidation is on by default",
 	configSrc.includes(
-		'factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", false)',
+		'factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", true)',
 	),
 	true,
 );
@@ -472,13 +478,13 @@ check(
 	false,
 );
 check(
-	"Comment and default after the change: it says the restore path exists now",
+	"Comment and default after the change: it names the restore path",
 	/restore/i.test(flagCommentText),
 	true,
 );
 check(
-	"Comment and default after the change: it names the flip as a separate pending decision",
-	/(owner|separate|deliberate|confirm)/i.test(flagCommentText),
+	"Comment and default after the change: it says how the flag is turned back off",
+	/HINDSIGHT_FACT_INVALIDATION=0/.test(flagCommentText),
 	true,
 );
 
@@ -497,7 +503,7 @@ check("No other default moves: every env-backed default is unchanged", defaults,
 	"HINDSIGHT_DEBUG=false",
 	"HINDSIGHT_DEEP_RECALL_MAX_LINES=24",
 	"HINDSIGHT_DEEP_RECALL_QUERIES=5",
-	"HINDSIGHT_FACT_INVALIDATION=false",
+	"HINDSIGHT_FACT_INVALIDATION=true",
 	"HINDSIGHT_RECALL_CONTEXT_TOKENS=5000",
 	"HINDSIGHT_RECALL_MAX_LINES=8",
 	"HINDSIGHT_RECALL_MAX_QUERIES=8",

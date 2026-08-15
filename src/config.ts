@@ -277,12 +277,13 @@ export function loadConfig(cwd: string): HindsightConfig {
 		bankReminderTurns: envInt("HINDSIGHT_BANK_REMINDER_TURNS", 5),
 		recallFilter:
 			process.env.HINDSIGHT_RECALL_FILTER === "off" ? "off" : "model",
-		// Still OFF by default. A restore path now exists in the product (/mem → Log,
-		// `u` on a retire row brings back every fact that entry killed), so the reason
-		// is no longer "a kill cannot be undone" but "watch it before trusting it":
-		// flipping this is a deliberate owner decision, pending confirmation of the
-		// kill/restore round trip on a real bank.
-		factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", false),
+		// ON by default since 0.4.1. Two things had to be true first, and now both
+		// are. A kill is reversible from inside the product: /mem → Log, `u` on a
+		// retire row calls restore on every fact that entry killed. And the judge was
+		// watched on a real bank before being trusted — its first live kill retired a
+		// fact asserting that src/review-server.ts exists, a file deleted in 0.3.0.
+		// Set HINDSIGHT_FACT_INVALIDATION=0 to keep facts immortal.
+		factInvalidation: envBool("HINDSIGHT_FACT_INVALIDATION", true),
 		recallBudget: (process.env.HINDSIGHT_RECALL_BUDGET as Budget) || "mid",
 		autoMemorize: envBool("HINDSIGHT_AUTO_MEMORIZE", true),
 		autoRecall: envBool("HINDSIGHT_AUTO_RECALL", true),

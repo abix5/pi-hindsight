@@ -331,7 +331,7 @@ Then each project you want memory in just declares its bank:
 | `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
 | `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set in the `/mem` Settings tab) |
 | `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (per-query LLM judge scores hits and drops junk) or `off` |
-| `factInvalidation` | `HINDSIGHT_FACT_INVALIDATION` | `false` | Let the write path retire orphaned bank facts, quote required (see below). Off by default so you can watch what it retires first; a kill is reversible from `/mem` → Log |
+| `factInvalidation` | `HINDSIGHT_FACT_INVALIDATION` | `true` | Let the write path retire orphaned bank facts, quote required (see below). A kill is reversible from `/mem` → Log with `u` |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
 | `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent-context budget for query building (tool output excluded) |
 | `taskDetect` | `HINDSIGHT_TASK_DETECT` | `true` | Run the task-change detector and the deep pass it triggers (see below) |
@@ -480,9 +480,13 @@ Restoring appends a new `restore` log entry as a `↑ … restore` row — the o
 retire row is never rewritten, so the history stays honest about what was retired
 and what was taken back. No manual API PATCH is needed.
 
-**This still ships off by default.** A kill is the one memory action that removes
-knowledge, and undoing one means noticing it first. So set `factInvalidation` to
-`true` deliberately, once you are willing to watch what it retires.
+**This is on by default as of 0.4.1.** It was not, for one release: a kill is
+the one memory action that removes knowledge, and it shipped off until two
+things were true. Both now are. Undoing a kill no longer needs an API call, and
+the judge has been watched making a real decision on a real bank — its first
+live kill retired a fact claiming a file existed that had been deleted a release
+earlier. Set `HINDSIGHT_FACT_INVALIDATION=0`, or `factInvalidation` to `false`,
+if you would rather your facts never die.
 
 There is deliberately no bank-cleanup command: the mechanism handles new writes
 and the backlog clears itself as work proceeds. Note that reprocessing a document
