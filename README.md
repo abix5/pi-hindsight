@@ -155,9 +155,9 @@ extraction:
   otherwise Russian facts are never stemmed and full-text search under-recalls.
 
 There is no way to check this automatically: `GET /v1/{ns}/banks/{bank}/config`
-returns 45 keys and not one of them is about language (verified against a live
-0.9.1 server), so the server's language settings are invisible to the
-extension. Keeping the three in agreement is left to you.
+returns 45 keys and no language key among them (verified against a live 0.9.1
+server), so the server's language settings are invisible to the extension.
+Keeping the three in agreement is left to you.
 
 The `metadata` is four fields, stored on every fact the document produces and
 returned with every recalled hit: `source` (which of the three write paths
