@@ -673,6 +673,12 @@ One fixed line: `🧠` · bank dot · bank id · auto-mode · bank size · last 
 The dot is `●` connected, `◐` checking, `○` not checked yet, `⟳` working; when
 the bank is unreachable its complaint replaces the size and the action.
 
+The auto-mode cue and the bank id share one tone, and that tone is the whole
+status: **bright** (`↙↗`) when both auto-recall and auto-memorize are on, **dim**
+as soon as either is off. Dim still names the missing side — a lone `↙` means
+only recall is automatic, a lone `↗` means only retain is, and `auto off` means
+neither is.
+
 The action tail (truncated from the right in a narrow terminal):
 
 ```
