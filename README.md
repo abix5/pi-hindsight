@@ -331,7 +331,7 @@ Then each project you want memory in just declares its bank:
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
 | `bankId` | `HINDSIGHT_BANK` | — (dormant) | Memory bank id; set it (or `"auto"`) to activate the plugin in a project |
-| `userBankId` | `HINDSIGHT_USER_BANK` | — (off) | Optional second bank for knowledge that holds across projects; when set, adds the `hindsight_retain_user` tool. Nothing is ever written here automatically. |
+| `userBankId` | `HINDSIGHT_USER_BANK` | `""` (off) | Optional second bank for knowledge that holds across projects; when set, adds the `hindsight_retain_user` tool. Nothing is ever written here automatically. |
 | `baseUrl` | `HINDSIGHT_BASE_URL` | `http://localhost:8888` | Hindsight API base URL |
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
