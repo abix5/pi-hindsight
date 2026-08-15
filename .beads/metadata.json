@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "pi_hindsight",
+  "project_id": "705e456d-a186-41b4-8e42-5bfaeca6a4c1"
+}
