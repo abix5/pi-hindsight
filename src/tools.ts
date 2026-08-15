@@ -65,6 +65,11 @@ export function registerTools(
 	// structurally unable to address it. Undefined when no user bank is declared,
 	// and then the tool below does not exist at all.
 	userBank?: { cfg: HindsightConfig; client: HindsightClient },
+	// Raised after a SUCCESSFUL user-bank write, so the caller can tell the user
+	// that whatever it froze into the system prompt no longer matches the bank.
+	// Notification only: acting on it inside the turn would rewrite the cached
+	// prompt prefix, which is the cost this whole contour is built to avoid.
+	onUserBankWrite?: () => void,
 ): void {
 	pi.registerTool({
 		name: "hindsight_retain",
@@ -147,6 +152,7 @@ export function registerTools(
 						signal,
 					);
 					appendDebug(cwd, "tool.retain-user.done", { kind });
+					onUserBankWrite?.();
 					return ok("retained");
 				} catch (err) {
 					appendDebug(cwd, "tool.retain-user.error", {

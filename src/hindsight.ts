@@ -6,6 +6,7 @@
  *   GET  /banks                           -> list banks
  *   POST /banks/{bank}/memories           -> retain (store memory items)
  *   POST /banks/{bank}/memories/recall    -> recall (search)
+ *   GET  /banks/{bank}/memories/list      -> list stored memories (no search)
  *   PATCH /banks/{bank}/memories/{id}     -> curate (edit / invalidate / restore)
  *   POST /banks/{bank}/reflect            -> reflect (synthesis)
  *
@@ -41,6 +42,22 @@ export interface RecallOptions {
 	 * servers ignore the unknown field. Defaults to true.
 	 */
 	preferObservations?: boolean;
+}
+
+/**
+ * One row of `memories/list`, narrowed to the fields this client reads.
+ *
+ * `fact_type` is the server's own spelling (NOT `type`): a retained note is
+ * stored twice — as the fact itself (`world`) and as a derived `observation`
+ * consolidated from it.
+ */
+export interface MemoryRow {
+	id?: string;
+	text?: string;
+	fact_type?: string;
+	state?: string;
+	tags?: string[];
+	metadata?: Record<string, unknown>;
 }
 
 /** Bank size counters shown in the status widget. */
@@ -148,6 +165,31 @@ export class HindsightClient {
 			documents: Number(s?.total_documents ?? 0),
 			facts: Number(s?.total_nodes ?? 0),
 		};
+	}
+
+	/**
+	 * GET /v1/{ns}/banks/{bank}/memories/list — the bank's stored rows.
+	 *
+	 * A plain listing on purpose: this is the read behind content that goes into
+	 * the system prompt, and recall/reflect would put a model call on that path.
+	 * That content must cost exactly one HTTP request and zero inference.
+	 *
+	 * The caller owns the timeout because callers differ in what a slow bank costs
+	 * them; omitted, it falls back to the client-wide default.
+	 */
+	async listMemories(
+		limit: number,
+		signal?: AbortSignal,
+		timeoutMs?: number,
+	): Promise<MemoryRow[]> {
+		const res = (await this.request(
+			"GET",
+			`${this.bankBase()}/memories/list?limit=${encodeURIComponent(String(limit))}`,
+			undefined,
+			signal,
+			timeoutMs,
+		)) as { items?: MemoryRow[] } | undefined;
+		return Array.isArray(res?.items) ? res.items : [];
 	}
 
 	/** GET /v1/{ns}/banks */

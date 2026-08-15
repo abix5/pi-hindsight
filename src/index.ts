@@ -27,6 +27,7 @@ import { loadState, saveState } from "./state.ts";
 import { newTaskState, type TaskState } from "./task-detector.ts";
 import { registerTools } from "./tools.ts";
 import { HindsightStatus } from "./ui.ts";
+import { applyUserBlock, buildUserBlock } from "./user-block.ts";
 
 export function recallTrace(recall: RecallInjectResult, tail = ""): string {
 	if (!recall.queried)
@@ -245,6 +246,75 @@ export default function (pi: ExtensionAPI) {
 	// without a request of its own — it must never touch the network.
 	let bankCounts: { documents: number; facts: number } | undefined;
 
+	// --- the user-profile epoch --------------------------------------------
+	//
+	// The user block is injected into the SYSTEM PROMPT, whose prefix the provider
+	// caches: rewriting it costs an order of magnitude more than reading it, so the
+	// block is read ONCE at an epoch boundary, frozen, and re-emitted byte for byte
+	// on every turn of that epoch. There are exactly two boundaries — session start
+	// and a SUCCESSFUL compaction. `session_before_compact` is not one: it can be
+	// cancelled by any handler returning {cancel:true}, and a boundary that may not
+	// happen would change the prompt mid-epoch.
+	//
+	// Closure state, not a file and not the session: an epoch lasts exactly as long
+	// as this extension instance, so `/reload` correctly starts a fresh one.
+	let userBlock: string | undefined;
+	let userBlockFacts = 0;
+	// Rows the bank may return for the block. Generous next to the size ceiling that
+	// actually bounds it, so the ceiling — not the page size — decides what is kept.
+	const USER_BLOCK_LIMIT = 200;
+	// Deliberately long. An instructions block that silently comes up empty is worse
+	// than a slow session start, and this wait happens twice a session at most.
+	const USER_BLOCK_CEILING_MS = 12000;
+
+	/**
+	 * Open an epoch: read the user bank once and freeze what it yields.
+	 *
+	 * A failed, timed-out or erroring read assigns NOTHING, so the previous epoch's
+	 * block simply stays in force; when there is no previous block, the state stays
+	 * "no block" and the prompt is left untouched, marker and all.
+	 */
+	const openUserEpoch = async (cwd: string, reason: string) => {
+		if (standDown) return;
+		const ub = userBankOf(cfg);
+		if (!ub) return; // no user bank declared: no request, no widget, no injection
+		try {
+			const rows = await ub.client.listMemories(
+				USER_BLOCK_LIMIT,
+				undefined,
+				USER_BLOCK_CEILING_MS,
+			);
+			const block = buildUserBlock(rows);
+			userBlock = block?.text;
+			userBlockFacts = block?.facts ?? 0;
+			if (block) status.userBlockIn(block.facts);
+			else status.userBlockOff();
+			appendDebug(cwd, "userblock.epoch", {
+				reason,
+				rows: rows.length,
+				facts: userBlockFacts,
+				chars: userBlock?.length ?? 0,
+			});
+		} catch (err) {
+			appendDebug(cwd, "userblock.epoch.error", {
+				reason,
+				error: (err as Error).message,
+				kept: userBlockFacts,
+			});
+			if (userBlock) status.userBlockIn(userBlockFacts);
+			else status.userBlockOff();
+		}
+	};
+
+	// Raised by a successful write to the user bank: the frozen block and the bank
+	// have diverged, and the widget owes the user that fact. It changes nothing in
+	// the prompt — swapping the block in now is exactly the mid-epoch rewrite this
+	// whole design exists to avoid.
+	const onUserBankWrite = () => {
+		if (standDown) return;
+		status.userBlockStale(userBlockFacts);
+	};
+
 	// Recall runs in `before_agent_start` so its result can be injected as a VISIBLE
 	// custom_message block (the only entry type that both renders in the TUI and
 	// reaches the model). That phase is pre-turn/preflight: the agent loop has not
@@ -329,7 +399,7 @@ export default function (pi: ExtensionAPI) {
 	} catch {
 		/* no config readable here; the user tool simply is not offered */
 	}
-	registerTools(pi, getState, userBankOf(loadCfg));
+	registerTools(pi, getState, userBankOf(loadCfg), onUserBankWrite);
 	registerCommands(pi, getState, () => memorizer, status, runtime);
 
 	pi.on("session_start", async (_event, ctx) => {
@@ -372,6 +442,11 @@ export default function (pi: ExtensionAPI) {
 		});
 		status.attach(ctx.ui);
 		if (!cfg || !client) return;
+		// First epoch boundary. Awaited: the runner awaits session_start handlers, so
+		// the block is frozen before the session's first turn can ask for it. It runs
+		// before the activation check on purpose — what the user bank knows about the
+		// person holds in every repository, including one with no project bank.
+		await openUserEpoch(ctx.cwd ?? process.cwd(), "session_start");
 		// Inactive project (no declared bank): do NOT ensureBank / sync missions /
 		// count / notify. Just hide the widget and bail — this is not an error.
 		if (!cfg.active) {
@@ -420,6 +495,33 @@ export default function (pi: ExtensionAPI) {
 				"warning",
 			);
 		}
+	});
+
+	// The second epoch boundary: a compaction that actually happened. Its cancellable
+	// sibling `session_before_compact` is deliberately not used — a handler can still
+	// return {cancel:true} there, and re-reading the bank for a compaction that never
+	// occurs would swap the block in the middle of a live epoch.
+	pi.on("session_compact", async (event, ctx) => {
+		if (standDown) return;
+		await openUserEpoch(ctx.cwd ?? process.cwd(), `compact:${event.reason}`);
+	});
+
+	// Inject the frozen user block into the system prompt.
+	//
+	// Pure local string work: the bank is never read here, only at a boundary, so
+	// the turn path waits on nothing. It returns ONLY a systemPrompt and never a
+	// message, which is what keeps "at most one 🧠 block per turn" intact.
+	//
+	// Its own handler rather than a branch inside the recall one below: recall bows
+	// out when auto-recall is off, when the project declares no bank, or when no
+	// model chain resolves — and none of those should decide whether the person's
+	// standing facts are in the prompt.
+	pi.on("before_agent_start", async (event, _ctx) => {
+		if (standDown || !userBlock) return;
+		const next = applyUserBlock(event.systemPrompt ?? "", userBlock);
+		// No marker in the instructions means no opinion about the prompt: returning
+		// nothing leaves the host's own string in place, byte for byte.
+		return next === undefined ? undefined : { systemPrompt: next };
 	});
 
 	// Pre-turn recall: query the bank and return a VISIBLE recall block that both
