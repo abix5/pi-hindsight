@@ -250,9 +250,14 @@ export class HindsightStatus {
 
 	private userLine(): string {
 		if (!this.user.injected) return "≡ no user block";
+		// Both readings name the epoch, because neither is live. Saying only
+		// "N facts in prompt" reads as a mirror of the bank, and a person who then
+		// edits the bank and sees the same line has no way to tell a deferred
+		// update from a broken feature. The stale variant says the divergence is
+		// already known; the plain one says when any change would show up.
 		return this.user.stale
 			? `≡ ${this.user.facts} facts · update next epoch`
-			: `≡ ${this.user.facts} facts in prompt`;
+			: `≡ ${this.user.facts} facts in prompt this epoch`;
 	}
 
 	/**
