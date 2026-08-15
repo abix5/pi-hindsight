@@ -455,6 +455,16 @@ Facts arrive in `id` order, derived observations are dropped so each fact
 appears once, and a 4000-character ceiling drops surplus facts whole rather than
 cutting a sentence in half.
 
+Each fact is also cut back to what it actually states. The server does not store
+the sentence it was given: `retain` appends ` | Involving: … | <why this was
+worth keeping>`. On this author's user bank that tail is about 40% of the text —
+1155 characters across four facts against roughly 800 without it — and unlike an
+ordinary message it does not scroll away: it settles into the cached prefix and
+is paid for on every turn of the epoch, in order to say "this is a standing
+principle of the user" beside the principle. So the block keeps everything
+before the first ` | Involving: ` and drops the rest; a text without that
+separator is kept whole.
+
 One consequence worth stating plainly: writing to the user bank with
 `hindsight_retain_user` does **not** change the current prompt. The widget says
 so (`≡ 4 facts · update next epoch`); the new fact joins the block at the next

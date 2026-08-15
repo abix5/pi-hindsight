@@ -600,6 +600,56 @@ for (const [label, mode] of [
 	host.done();
 }
 
+// ========= Requirement: only the stated fact is cached, not the server's tail
+
+// --- Scenario: A fact stored with a provenance tail, and one stored without
+// The bank does not store the sentence it was given: retain appends
+// " | Involving: … | <why this was kept>". Those bytes would live in the cached
+// prefix for the whole epoch and be re-read every turn, so the block carries the
+// fact and not the bookkeeping — while a text that has no such tail is untouched.
+{
+	arm([
+		{
+			id: "00000000-0000-4000-8000-000000000001",
+			text: "UB-TAILED: the person treats another party's numbers as a claim until verified. | Involving: user | This is a standing principle of the user when judging information.",
+			fact_type: "world",
+			state: "valid",
+		},
+		{
+			id: "00000000-0000-4000-8000-000000000002",
+			text: "UB-PLAIN: the person prefers the shortest diff that actually works.",
+			fact_type: "world",
+			state: "valid",
+		},
+	]);
+	const h = newHarness({ cwd: makeCwd("tail", {}) });
+	await h.start();
+	const t = await h.turn(HOST);
+	const block = blockOf(t, HOST);
+	h.done();
+	check(
+		"Provenance tail: a tailed fact keeps its statement and loses the bookkeeping, an untailed one is kept whole",
+		{
+			injected: block.length > 0,
+			statementKept: block.includes(
+				"UB-TAILED: the person treats another party's numbers as a claim until verified.",
+			),
+			separatorGone: block.includes("Involving"),
+			rationaleGone: block.includes("standing principle"),
+			untailedFactKeptWhole: block.includes(
+				"UB-PLAIN: the person prefers the shortest diff that actually works.",
+			),
+		},
+		{
+			injected: true,
+			statementKept: true,
+			separatorGone: false,
+			rationaleGone: false,
+			untailedFactKeptWhole: true,
+		},
+	);
+}
+
 // A last sanity line on the transport: every byte these tests judged came from
 // the stub, and the user bank really was consulted somewhere in this file.
 check(

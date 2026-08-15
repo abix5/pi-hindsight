@@ -52,6 +52,28 @@ function flatten(s: string): string {
 }
 
 /**
+ * Where the server's own bookkeeping starts inside a stored fact's text.
+ *
+ * `retain` does not store the sentence it was given: it appends
+ * ` | Involving: <entities> | <why this was worth keeping>`. On the live user
+ * bank that tail is roughly 40% of the bytes — 1155 characters across four
+ * facts against about 800 without it — and these are not bytes in a message that
+ * scrolls away. They settle into the cached prompt prefix for the whole epoch
+ * and are paid for on every turn of it, to say things like "this is a standing
+ * principle of the user" next to the principle itself.
+ *
+ * Matched after flattening, so the separator is exactly one space either side
+ * however the server wrapped it.
+ */
+const PROVENANCE_TAIL = " | Involving: ";
+
+/** The fact as stated, without the server's provenance tail when it has one. */
+function stated(text: string): string {
+	const cut = text.indexOf(PROVENANCE_TAIL);
+	return cut === -1 ? text : text.slice(0, cut).trim();
+}
+
+/**
  * Assemble the block from a bank listing, or return undefined when nothing
  * qualifies — "no block" is a real answer, and the caller then leaves the
  * prompt alone rather than injecting an empty shell.
@@ -75,7 +97,7 @@ export function buildUserBlock(rows: MemoryRow[]): UserBlock | undefined {
 							? 1
 							: 0,
 		)
-		.map((r) => flatten(String(r.text ?? "")))
+		.map((r) => stated(flatten(String(r.text ?? ""))))
 		.filter((t) => {
 			if (!t || seen.has(t)) return false;
 			seen.add(t);
