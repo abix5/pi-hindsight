@@ -306,13 +306,25 @@ export class HindsightStatus {
 		);
 	}
 
-	/** Compact auto-mode cue: ↙ = recall, ↗ = retain. */
+	/**
+	 * Compact auto-mode cue: ↙ = recall, ↗ = retain.
+	 *
+	 * Tone is coupled to "both contours on", not to the individual glyphs: fully-on
+	 * is the state worth seeing at a glance, so it is the bright one. The earlier
+	 * mapping had it backwards — healthy whispered in `dim` while a switched-off
+	 * contour shouted in `warning`, which reads as a fault rather than a choice.
+	 */
 	private autoMode(): { text: string; tone: ThemeColor } {
-		if (this.recall.off && this.memo.off)
-			return { text: "auto off", tone: "warning" };
-		if (this.recall.off) return { text: "↗", tone: "warning" };
-		if (this.memo.off) return { text: "↙", tone: "warning" };
-		return { text: "↙↗", tone: "dim" };
+		const tone: ThemeColor = this.autoOn() ? "accent" : "dim";
+		if (this.recall.off && this.memo.off) return { text: "auto off", tone };
+		if (this.recall.off) return { text: "↗", tone };
+		if (this.memo.off) return { text: "↙", tone };
+		return { text: "↙↗", tone };
+	}
+
+	/** Automatic memory is fully on only when BOTH contours are. */
+	private autoOn(): boolean {
+		return !this.recall.off && !this.memo.off;
 	}
 
 	/**
@@ -348,7 +360,7 @@ export class HindsightStatus {
 		// them while measuring.
 		const headPlain = `🧠 ● ${name} ${mode.text}${sizePlain ? ` ${sizePlain}` : ""}`;
 		const head =
-			`${this.c("accent", "🧠")} ${icon} ${this.c("dim", name)}` +
+			`${this.c("accent", "🧠")} ${icon} ${this.c(mode.tone, name)}` +
 			` ${this.c(mode.tone, mode.text)}${sizePlain ? ` ${size}` : ""}`;
 
 		const tail = this.tail();

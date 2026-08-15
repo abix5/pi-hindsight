@@ -97,6 +97,11 @@ export interface HindsightConfig {
 	dispatchLogPath: string;
 	/** Background poll interval (ms) for refreshing widget doc/fact counters. */
 	countsRefreshMs: number;
+	/**
+	 * Days a document may sit unreviewed in the review queue before it is approved
+	 * automatically. `0` (or negative) disables expiry — everything waits for a human.
+	 */
+	reviewAutoApproveDays: number;
 	/** Verbose debug logging (full prompts + HTTP bodies) to .pi/hindsight/debug.log. Off by default (may leak sensitive data). */
 	debug: boolean;
 }
@@ -198,6 +203,7 @@ export const CONFIG_ALLOW = new Set<keyof HindsightConfig>([
 	"logPath",
 	"dispatchLogPath",
 	"countsRefreshMs",
+	"reviewAutoApproveDays",
 	"debug",
 ]);
 
@@ -303,6 +309,7 @@ export function loadConfig(cwd: string): HindsightConfig {
 			process.env.HINDSIGHT_DISPATCH_LOG_PATH ??
 			".pi/hindsight/dispatch-log.jsonl",
 		countsRefreshMs: envInt("HINDSIGHT_COUNTS_REFRESH_MS", 20000),
+		reviewAutoApproveDays: envInt("HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS", 7),
 		debug: envBool("HINDSIGHT_DEBUG", false),
 	};
 	const global = readGlobalOverrides();

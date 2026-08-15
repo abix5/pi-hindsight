@@ -26,8 +26,10 @@ A small status widget shows both contours live, on one line:
 
 Bank dot · bank id · auto-mode · bank size (`16d` documents, `153f` facts) ·
 the last memory action. Auto-mode markers: `↙` = recall, `↗` = retain,
-`auto off` = both disabled. On a recall, `12→3` is *found → injected* (the rest
-were already seen this session).
+`auto off` = both disabled. The markers **and the bank id** are bright while
+both contours are on, and dim as soon as either is off — so a glance tells you
+whether automatic memory is fully running. On a recall, `12→3` is
+*found → injected* (the rest were already seen this session).
 
 ---
 
@@ -165,6 +167,15 @@ fact count, project and trigger — so you can:
 Queue entries whose document never made it to the bank (a run that produced
 nothing durable) are dropped automatically. The queue is an append-only event
 log, so parallel pi sessions can write to it safely.
+
+A document nobody looks at for **7 days** is approved automatically, so the
+queue cannot grow without bound. That costs nothing in memory: approving never
+touched the bank in the first place — the document was stored the moment it was
+enqueued, and `d` is the only action that removes anything. The automatic
+approval is written into the log as its own kind of `done` event (marked
+`"by": "expiry"`), so the history still shows which entries a human actually
+confirmed. Change the window with `HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS`, or set
+it to `0` to keep everything pending until you review it by hand.
 
 ### Pointers & `/mem-retain`
 
@@ -346,6 +357,7 @@ Then each project you want memory in just declares its bank:
 | `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
 | `dispatchLogPath` | `HINDSIGHT_DISPATCH_LOG_PATH` | `.pi/hindsight/dispatch-log.jsonl` | Journal of stored documents (powers `/mem-save all` cleanup) |
 | `countsRefreshMs` | `HINDSIGHT_COUNTS_REFRESH_MS` | `20000` | Widget counter refresh interval |
+| `reviewAutoApproveDays` | `HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS` | `7` | Days a pending review entry waits before it is approved automatically; `0` disables expiry |
 | `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging (full prompts/bodies) — **may leak sensitive data** |
 
 > The write pipeline runs entirely off-conversation via `retainModelId` — no
