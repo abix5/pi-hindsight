@@ -489,7 +489,10 @@ check(
 );
 
 // Every env-backed default, frozen. The restore path is allowed to change the
-// COMMENT above one flag and nothing else in this file's behaviour.
+// COMMENT above one flag and nothing else in this file's behaviour. The list is
+// extended — never weakened — when a new key is deliberately added, which is why
+// the review auto-approval window appears below: adding a key must be a visible
+// decision, not a silent drift of somebody else's default.
 const defaults = [...configSrc.matchAll(/env(?:Bool|Int)\("([A-Z_]+)",\s*([^)]+)\)/g)]
 	.map((m) => `${m[1]}=${m[2].trim()}`)
 	.sort();
@@ -508,6 +511,7 @@ check("No other default moves: every env-backed default is unchanged", defaults,
 	"HINDSIGHT_RECALL_MAX_LINES=8",
 	"HINDSIGHT_RECALL_MAX_QUERIES=8",
 	"HINDSIGHT_RECALL_MAX_TOKENS=2048",
+	"HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS=7",
 	"HINDSIGHT_SUMMARY_MAX_TOKENS=6000",
 	"HINDSIGHT_TASK_DETECT=true",
 	"HINDSIGHT_TASK_HISTORY_TURNS=12",

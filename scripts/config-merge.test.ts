@@ -162,6 +162,52 @@ function slugOf(cwd: string): string {
 	check("(g) CONFIG_ALLOW has dropped it", !CONFIG_ALLOW.has("recallOperation" as never));
 }
 
+// (h) the review auto-approval window is an ordinary allow-listed key ------
+{
+	// Documents awaiting review used to wait forever. The window that ages them
+	// out is a normal config key, so it must follow the same three-layer merge as
+	// every other one — including a project file that wants a shorter leash.
+	writeGlobal(null);
+	const plain = makeCwd("h-default", null);
+	cleanup.push(plain);
+	const def = loadConfig(plain) as unknown as Record<string, unknown>;
+	check(
+		"(h) Default value: reviewAutoApproveDays defaults to 7",
+		def.reviewAutoApproveDays === 7,
+	);
+
+	process.env.HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS = "3";
+	const fromEnv = loadConfig(plain) as unknown as Record<string, unknown>;
+	check(
+		"(h) Environment override: HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS=3 beats the default",
+		fromEnv.reviewAutoApproveDays === 3,
+	);
+
+	writeGlobal({ reviewAutoApproveDays: 5 });
+	const cwd = makeCwd("h-file", { reviewAutoApproveDays: 2 });
+	cleanup.push(cwd);
+	const merged = loadConfig(cwd) as unknown as Record<string, unknown>;
+	delete process.env.HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS;
+	check(
+		"(h) File override: the project file beats the global file and the env",
+		merged.reviewAutoApproveDays === 2,
+	);
+	check(
+		"(h) File override: the key is allow-listed",
+		CONFIG_ALLOW.has("reviewAutoApproveDays" as never),
+	);
+	check(
+		"(h) File override: 0 survives the merge (expiry off, not a falsy fallback to 7)",
+		(
+			loadConfig(makeCwd("h-zero", { reviewAutoApproveDays: 0 })) as unknown as Record<
+				string,
+				unknown
+			>
+		).reviewAutoApproveDays === 0,
+	);
+	writeGlobal(null);
+}
+
 for (const dir of cleanup) fs.rmSync(dir, { recursive: true, force: true });
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
