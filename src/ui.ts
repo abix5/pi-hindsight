@@ -109,6 +109,15 @@ export class HindsightStatus {
 		 */
 		retired: 0,
 	};
+	/**
+	 * The user-profile block in the system prompt. `mode: "none"` means no user
+	 * bank was ever declared, and then the widget looks exactly as it did before
+	 * this feature existed — an unrelated project must not grow a new glyph.
+	 */
+	private user = {
+		mode: "none" as "none" | "in" | "off" | "stale",
+		facts: 0,
+	};
 
 	/** Point at the current UI (call on each event; the reference can change). */
 	attach(ui: Ui | undefined): void {
@@ -214,6 +223,54 @@ export class HindsightStatus {
 					? "nothing found"
 					: `${info.found}→${info.injected}`;
 		return `↙ ${info.op} · ${outcome} · ${trunc(info.query || "(empty)", 40)}`;
+	}
+
+	// --- user-profile block (system prompt) ---------------------------------
+	/**
+	 * The block is frozen into this epoch's prompt, carrying `facts` facts.
+	 *
+	 * All three states say when the line will change, because the block is NOT
+	 * live: it is fixed for the epoch, so a user who edits the bank needs to know
+	 * that what they are looking at is last boundary's answer.
+	 */
+	userBlockIn(facts: number): void {
+		this.user = { mode: "in", facts };
+		this.lastAction = { text: `≡ ${facts} facts in prompt`, tone: "dim" };
+		this.render();
+	}
+	/** This epoch injects nothing: no marker, no bank, or a failed first read. */
+	userBlockOff(): void {
+		this.user = { mode: "off", facts: 0 };
+		this.lastAction = { text: "≡ no user block", tone: "dim" };
+		this.render();
+	}
+	/** The bank moved under the frozen block; the prompt follows at the next boundary. */
+	userBlockStale(facts: number): void {
+		this.user = { mode: "stale", facts };
+		this.lastAction = {
+			text: `≡ ${facts} facts · update next epoch`,
+			tone: "dim",
+		};
+		this.render();
+	}
+
+	/**
+	 * The head's standing fragment for the block: `≡4` injected, `≡4→` injected
+	 * but outrun by the bank, `≡–` not injected. It lives in the fixed head rather
+	 * than the tail because the tail is overwritten by the next recall or write,
+	 * and "is my profile in the prompt" must stay answerable all turn.
+	 */
+	private userFrag(): string {
+		switch (this.user.mode) {
+			case "in":
+				return `≡${this.user.facts}`;
+			case "stale":
+				return `≡${this.user.facts}→`;
+			case "off":
+				return "≡–";
+			default:
+				return "";
+		}
 	}
 
 	// --- memorize (write) ---------------------------------------------------
@@ -360,8 +417,17 @@ export class HindsightStatus {
 		// thing that gives way when the line is tight is the last action, which
 		// repeats every turn and is the cheapest thing on the line to lose.
 		const kills = this.memo.retired > 0 ? `\u2193${this.memo.retired}` : "";
-		const sizePlain = `${counts}${kills}`;
-		const size = `${counts ? this.c("muted", counts) : ""}${kills ? this.c("warning", kills) : ""}`;
+		// The user-block fragment rides in the same head group, and is built as a
+		// PLAIN twin alongside the coloured one so the budget arithmetic below stays
+		// honest — a fragment measured only in its styled form measures the ANSI too.
+		const userFrag = this.userFrag();
+		const sizePlain = [`${counts}${kills}`, userFrag].filter(Boolean).join(" ");
+		const size = [
+			`${counts ? this.c("muted", counts) : ""}${kills ? this.c("warning", kills) : ""}`,
+			userFrag ? this.c(this.user.mode === "off" ? "dim" : "muted", userFrag) : "",
+		]
+			.filter(Boolean)
+			.join(" ");
 		// Every state icon (● ◐ ○ ⟳) is one column, so one stands in for all of
 		// them while measuring.
 		const headPlain = `🧠 ● ${name} ${mode.text}${sizePlain ? ` ${sizePlain}` : ""}`;
