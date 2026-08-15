@@ -331,7 +331,7 @@ Then each project you want memory in just declares its bank:
 | `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
 | `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set in the `/mem` Settings tab) |
 | `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (per-query LLM judge scores hits and drops junk) or `off` |
-| `factInvalidation` | `HINDSIGHT_FACT_INVALIDATION` | `false` | Let the write path retire orphaned bank facts, quote required (see below). Off by default: a kill destroys knowledge and this package cannot undo one |
+| `factInvalidation` | `HINDSIGHT_FACT_INVALIDATION` | `false` | Let the write path retire orphaned bank facts, quote required (see below). Off by default so you can watch what it retires first; a kill is reversible from `/mem` → Log |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
 | `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent-context budget for query building (tool output excluded) |
 | `taskDetect` | `HINDSIGHT_TASK_DETECT` | `true` | Run the task-change detector and the deep pass it triggers (see below) |
@@ -470,12 +470,19 @@ model outage all end with the memory stored. Observations are skipped (they are
 derived and regenerate), and so is a delta too large to fit one model window,
 since a truncated transcript cannot verify a quote.
 
-**This ships off by default.** A kill is the one memory action that destroys
-knowledge, and this package offers no way to undo one — the row survives on the
-server, but restoring it means a hand-written `PATCH` against the API. So set
-`factInvalidation` to `true` deliberately, once you are willing to watch what it
-retires. Every kill it makes is written to the log with the retired fact's text
-and the quote that condemned it, so `/mem` → Log shows exactly what died and why.
+**A kill is reversible from inside pi.** Every kill is written to the log with
+the retired fact's text and the quote that condemned it, so `/mem` → Log shows
+exactly what died and why — as a `↓ … retire` row, `Enter` for the detail. Press
+**`u`** on that row and every fact the entry killed goes back to `state: valid`
+in the bank and reappears in recall. It is row-granular: one keypress undoes the
+whole decision the write path made about that delta, with no per-fact picking.
+The undo is *appended* to the log as a `↑ … restore` row — the original retire row
+is never rewritten, so the history stays honest about what was retired and what
+was taken back. No hand-written API call is needed.
+
+**This still ships off by default.** A kill is the one memory action that removes
+knowledge, and undoing one means noticing it first. So set `factInvalidation` to
+`true` deliberately, once you are willing to watch what it retires.
 
 There is deliberately no bank-cleanup command: the mechanism handles new writes
 and the backlog clears itself as work proceeds. Note that reprocessing a document

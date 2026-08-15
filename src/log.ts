@@ -16,7 +16,7 @@ export function setDebugEnabled(on: boolean): void {
 
 export type HindsightLogEntry = {
 	ts: string;
-	type: "recall" | "reflect" | "retain" | "invalidate" | "error";
+	type: "recall" | "reflect" | "retain" | "invalidate" | "restore" | "error";
 	user?: string;
 	query?: string;
 	operation?: "recall" | "reflect";
@@ -38,6 +38,10 @@ export type HindsightLogEntry = {
 	 * one. The id alone would be useless locally: once the row is invalidated the
 	 * bank stops returning it, so the text has to be captured here at kill time or
 	 * it is unrecoverable from this side.
+	 *
+	 * A `restore` entry repeats the payload it brought back rather than editing the
+	 * `invalidate` entry it undoes: this log is append-only, so the history of a
+	 * fact is the sequence of entries mentioning it, never a rewritten line.
 	 */
 	kills?: Array<{ id: string; quote: string; text: string }>;
 };
