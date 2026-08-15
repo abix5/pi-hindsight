@@ -476,9 +476,9 @@ exactly what died and why — as a `↓ … retire` row, `Enter` for the detail.
 **`u`** on that row and every fact the entry killed goes back to `state: valid`
 in the bank and reappears in recall. It is row-granular: one keypress undoes the
 whole decision the write path made about that delta, with no per-fact picking.
-The undo is *appended* to the log as a `↑ … restore` row — the original retire row
-is never rewritten, so the history stays honest about what was retired and what
-was taken back. No hand-written API call is needed.
+Restoring appends a new `restore` log entry as a `↑ … restore` row — the original
+retire row is never rewritten, so the history stays honest about what was retired
+and what was taken back. No manual API PATCH is needed.
 
 **This still ships off by default.** A kill is the one memory action that removes
 knowledge, and undoing one means noticing it first. So set `factInvalidation` to
