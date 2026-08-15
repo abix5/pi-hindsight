@@ -38,8 +38,15 @@ const ui = {
 };
 
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
-/** Visible columns; the brain glyph is the only double-width character. */
-const cols = (s: string) => [...strip(s)].length + (s.includes("🧠") ? 1 : 0);
+/**
+ * Visible columns; the brain glyph is the only double-width character.
+ *
+ * Counts every occurrence, mirroring `width()` in src/ui.ts. Both used to add a
+ * flat 1 for `includes`, so a second glyph was invisible to the renderer AND to
+ * this measure — a test that shares its subject's blind spot cannot see past it.
+ */
+const cols = (s: string) =>
+	[...strip(s)].length + (strip(s).match(/\uD83E\uDDE0/g)?.length ?? 0);
 
 const LONG =
 	"a very long recall query about database migrations that nobody would ever type";
@@ -272,6 +279,29 @@ frame("all four combinations: both auto flags off", (s) => {
 	s.memoOff();
 	outcome(s);
 });
+
+// A bank whose NAME carries the glyph puts two on the line. Nothing emits this
+// today; the point is that the width measure survives a second one, because a
+// line measured short is a line the host wraps — and a wrapped line is the
+// height change the whole one-line invariant exists to prevent. The bare
+// "fits 72" frame above cannot see the difference (a short line stays under the
+// cap whether or not it is undercounted by one), so the sensitive assertion is
+// the exact-72 one below, where an off-by-one lands on 73.
+{
+	const s = new HindsightStatus();
+	s.attach(ui);
+	s.setBank("\uD83E\uDDE0-bank-with-a-long-name", "http://localhost:7078");
+	s.bankOk();
+	s.setBankCounts(999999, 999999);
+	outcome(s);
+	const line = (widget ?? [])[0] ?? "";
+	console.log(`      ${strip(line)}`);
+	check(
+		"Plain twin stays in step (two glyphs): a truncated tail lands on exactly 72 columns",
+		cols(line),
+		72,
+	);
+}
 
 // Scenario: Plain twin stays in step ----------------------------------------
 // headPlain is what the budget arithmetic measures. When the tail is long

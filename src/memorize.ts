@@ -1,14 +1,24 @@
 /**
  * Contour A — Memorize (write path).
  *
- * Triggered on compaction and manual /mem-save ONLY (never shutdown or
- * reload). Runs OFF the event handler (fire-and-forget) so the main agent never
- * waits. Per-session FIFO queue keeps jobs of one session strictly sequential
- * (each needs the prior watermark).
+ * Triggered on compaction, at session shutdown, and by manual /mem-save. Runs
+ * OFF the event handler (fire-and-forget) so the main agent never waits.
+ * Per-session FIFO queue keeps jobs of one session strictly sequential (each
+ * needs the prior watermark).
+ *
+ * A shutdown flush is deliberately UNBOUNDED — it is the last chance, so it runs
+ * to the end of the session instead of stopping at a compaction boundary. That
+ * pushes the watermark past where a later compaction's boundary sits, and the
+ * next compaction then legitimately finds an empty window; `run` tells that
+ * apart from an idle session rather than claiming memory is up to date.
  *
  * Steps: collect delta after watermark → deterministic clean → chunk by model
  * window → write chunk files → move watermark → notify main window → run the
  * extract/merge/verify/retain pipeline (inline engine).
+ *
+ * Durability rests on the transcript rather than on a copy of the job: a failed
+ * write leaves the watermark where it was, so the same delta is re-collected on
+ * the next flush from the source of truth.
  */
 
 import * as fs from "node:fs";

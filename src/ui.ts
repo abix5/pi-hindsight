@@ -45,9 +45,15 @@ function trunc(s: string, n: number): string {
 /**
  * Visible columns of a plain (un-styled) fragment. The brain glyph is the only
  * double-width character the widget emits; everything else is 1 column.
+ *
+ * Counts EVERY occurrence. An earlier version added a flat 1 for `includes`,
+ * which measured a two-glyph string a column short — and a line measured short
+ * is a line the host wraps, which is exactly the height change the one-line
+ * invariant exists to prevent. Today the head emits one glyph, so this never
+ * fired; the guard is against the next caller, not against present behaviour.
  */
 function width(s: string): number {
-	return [...s].length + (s.includes("🧠") ? 1 : 0);
+	return [...s].length + (s.match(/\uD83E\uDDE0/g)?.length ?? 0);
 }
 
 /**
