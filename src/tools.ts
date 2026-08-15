@@ -14,7 +14,12 @@ import type { HindsightConfig } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
 import { appendDebug } from "./log.ts";
 import { formatRecallHits } from "./recall.ts";
-import { retainContext, retainMetadata } from "./retain-hygiene.ts";
+import {
+	retainContext,
+	retainMetadata,
+	userRetainContext,
+	userRetainMetadata,
+} from "./retain-hygiene.ts";
 
 const RetainParams = Type.Object({
 	content: Type.String({
@@ -127,19 +132,17 @@ export function registerTools(
 				const kind = params.kind ?? "fact";
 				const cwd = process.cwd();
 				try {
-					// Same hygiene as the project retain — context, metadata and memory
-					// language all come from the shared module, so the two write paths
-					// differ in their bank and tags and in nothing else.
-					const provenance = {
-						project: path.basename(cwd),
-						language: userBank.cfg.memoryLanguage,
-					};
+					// The two banks share the disciplines of retain-hygiene.ts (third
+					// person speaker, imperative language) but not the frame: what is
+					// stored here is true of the person in every repository, so it names
+					// no project — and its metadata says `scope`, not `project`.
+					const provenance = { language: userBank.cfg.memoryLanguage };
 					await userBank.client.retain(
 						params.content,
 						{
 							tags: [userBank.cfg.userBankId, "user-manual", kind],
-							context: retainContext("agent-note", provenance),
-							metadata: retainMetadata("agent-note", provenance),
+							context: userRetainContext(provenance),
+							metadata: userRetainMetadata(provenance),
 						},
 						signal,
 					);
