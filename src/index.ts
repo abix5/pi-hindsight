@@ -1,6 +1,7 @@
 /** pi-hindsight: long-term project memory over local Hindsight. */
 
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { type HindsightConfig, loadConfig } from "./config.ts";
@@ -27,7 +28,11 @@ import { loadState, saveState } from "./state.ts";
 import { newTaskState, type TaskState } from "./task-detector.ts";
 import { registerTools } from "./tools.ts";
 import { HindsightStatus } from "./ui.ts";
-import { applyUserBlock, buildUserBlock } from "./user-block.ts";
+import {
+	applyUserBlock,
+	buildUserBlock,
+	USER_BLOCK_MARKER,
+} from "./user-block.ts";
 
 export function recallTrace(recall: RecallInjectResult, tail = ""): string {
 	if (!recall.queried)
@@ -273,6 +278,43 @@ export default function (pi: ExtensionAPI) {
 	const USER_BLOCK_CEILING_MS = 12000;
 
 	/**
+	 * Has a marker been seen in a system prompt of this session?
+	 *
+	 * Set from the turn hook, read at the next boundary. It is what keeps the file
+	 * probe below from being a trap: a marker that arrives from anywhere the probe
+	 * does not know about costs one boundary of delay, not the feature.
+	 */
+	let markerSeen = false;
+
+	/**
+	 * Could this session's prompt carry the marker at all?
+	 *
+	 * A boundary has no prompt yet — it happens before the first turn — so the
+	 * only way to answer is the instruction files whose text pi inlines verbatim:
+	 * the project's own AGENTS.md and the global ~/.pi/agent/AGENTS.md. This does
+	 * NOT move the substitution: that still keys on the assembled prompt, which is
+	 * what makes the marker work wherever it ends up. It decides one thing only —
+	 * whether to spend a bank request. A project that declares a user bank but
+	 * never wrote the marker would otherwise pay a request at every session start
+	 * and every compaction for a block it can never inject.
+	 */
+	const markerReachable = (cwd: string): boolean => {
+		if (markerSeen) return true;
+		for (const file of [
+			path.join(cwd, "AGENTS.md"),
+			path.join(os.homedir(), ".pi", "agent", "AGENTS.md"),
+		]) {
+			try {
+				if (fs.readFileSync(file, "utf8").includes(USER_BLOCK_MARKER))
+					return true;
+			} catch {
+				/* absent or unreadable: no marker to be had here */
+			}
+		}
+		return false;
+	};
+
+	/**
 	 * Open an epoch: read the user bank once and freeze what it yields.
 	 *
 	 * A failed, timed-out or erroring read assigns NOTHING, so the previous epoch's
@@ -283,6 +325,10 @@ export default function (pi: ExtensionAPI) {
 		if (standDown) return;
 		const ub = userBankOf(cfg);
 		if (!ub) return; // no user bank declared: no request, no widget, no injection
+		if (!markerReachable(cwd)) {
+			appendDebug(cwd, "userblock.epoch.nomarker", { reason });
+			return;
+		}
 		try {
 			const rows = await ub.client.listMemories(
 				USER_BLOCK_LIMIT,
@@ -521,6 +567,9 @@ export default function (pi: ExtensionAPI) {
 	// standing facts are in the prompt.
 	pi.on("before_agent_start", async (event, _ctx) => {
 		if (standDown || !cfg?.userBankId) return;
+		// Remembered for the NEXT boundary, never acted on here: reading the bank
+		// now is the mid-epoch prompt rewrite this whole design exists to avoid.
+		if (event.systemPrompt?.includes(USER_BLOCK_MARKER)) markerSeen = true;
 		const next = userBlock
 			? applyUserBlock(event.systemPrompt ?? "", userBlock)
 			: undefined;

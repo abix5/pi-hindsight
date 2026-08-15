@@ -425,6 +425,16 @@ and the prompt the host assembled is used unchanged. No user bank, no marker, a
 sleeping server, an empty bank — all of them land in the second case, and the
 worst that shows up in the prompt is an HTML comment nobody renders.
 
+A boundary happens before there is a prompt to look at, so before spending a
+request the extension asks a cheaper question: could a marker reach this session
+at all? It looks in the two files pi inlines verbatim — the project's `AGENTS.md`
+and your global `~/.pi/agent/AGENTS.md`. Neither carries the marker, and no bank
+request is made; a project that declares a user bank but never opted in pays
+nothing, twice a session, forever. This does not narrow where the marker works:
+the substitution still runs against the assembled prompt. Put the marker
+somewhere else the host inlines and the block simply arrives one boundary late —
+the turn hook notices the marker and the next boundary reads the bank.
+
 **The block is frozen for an epoch, and that is the point.** The provider caches
 the system-prompt prefix; on this author's own sessions reading that cache cost
 $0.31–$0.50 per million tokens while rewriting it cost $4.28–$6.37 — twelve to
