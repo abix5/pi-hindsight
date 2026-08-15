@@ -484,10 +484,12 @@ export class Memorizer {
 		this.deps.status.memoCollecting(chunks.length, reason);
 		writeDeltaChunks(cwd, cfg.deltaDir, chunks);
 
-		// Show in the MAIN window that we launched memory collection.
+		// Show in the MAIN window that we launched memory collection. No 🧠 here:
+		// notify() prepends one to every message, and this call site used to add a
+		// second, rendering "🧠 🧠 memory collection started".
 		this.notify(
 			ctx,
-			`🧠 memory collection started (${reason}): ${chunks.length} chunk(s)`,
+			`memory collection started (${reason}): ${chunks.length} chunk(s)`,
 		);
 
 		const lastId = windowLastId;

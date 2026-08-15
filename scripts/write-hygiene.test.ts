@@ -17,7 +17,12 @@
  *      `document_id` still rides along so upsert behaviour is unchanged;
  *   5. the bank-config PATCH keeps its `{updates:{…}}` wrapper (bare keys 422);
  *   6. the post-write notification names WHAT was stored, on ONE line, with no
- *      ANSI and no newline — and degrades to counts rather than to garbage.
+ *      ANSI and no newline — and degrades to counts rather than to garbage;
+ *   7. no `notify()` call site prepends its own 🧠. `notify()` decorates every
+ *      message it sends, so a call site that also carries one renders
+ *      "🧠 🧠 memory collection started" — which is what the owner saw. The
+ *      glyph has two spellings in this file (escape inside `notify()`, literal
+ *      at call sites), so both are checked.
  */
 
 import * as fs from "node:fs";
@@ -305,7 +310,7 @@ console.log(`\nNOTICE huge:\n${writeNotice(hugeBullet)}`);
 check("an over-long subject is cut", hugeSubject.endsWith("\u2026"), true);
 check(
 	"\u2026 on a word boundary, never mid-word",
-	/^  \u00b7 (word )*word\u2026$/.test(hugeSubject),
+	/^ {2}\u00b7 (word )*word\u2026$/.test(hugeSubject),
 	true,
 );
 
@@ -360,6 +365,25 @@ for (const [label, notice] of [
 	);
 	check(`${label}: no blank row`, rows.some((r) => !r.trim()), false);
 }
+
+// No call site decorates its own notification. `notify()` prepends the 🧠 to
+// every message it sends, so a caller that carries one renders
+// "🧠 🧠 memory collection started" in the main window — which is what the owner
+// saw. Counting glyphs file-wide would be the wrong rule: `console.error` on the
+// crash path legitimately carries its own, because stderr is a different
+// surface that never passes through notify(). So the guard reads the ARGUMENTS.
+// Both spellings must be checked — notify() itself is written with the
+// surrogate-pair escape while call sites use the literal, and a guard that knew
+// only one of them would have missed this.
+const memorizeSrc = fs.readFileSync(
+	path.join(import.meta.dirname, "../src/memorize.ts"),
+	"utf8",
+);
+const BRAIN = /\uD83E\uDDE0|\\uD83E\\uDDE0/i;
+const decorated = [
+	...memorizeSrc.matchAll(/this\.notify\(([\s\S]{0,400}?)\);/g),
+].filter((m) => BRAIN.test(m[1] ?? ""));
+check("no notify() call site prepends its own brain", decorated.length, 0);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 if (failures > 0) process.exit(1);
