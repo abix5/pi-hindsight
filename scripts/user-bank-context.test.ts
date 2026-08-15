@@ -247,26 +247,20 @@ check(
 );
 
 // --- Scenario: Cross-project scope is stated
-// The key name is the implementer's to choose (`scope: "user"` is the obvious
-// one); what must hold is that SOME field other than the write-path/language/
-// session bookkeeping marks the record as user-scoped.
-const scopeKeys = Object.entries(userMeta).filter(
-	([k, v]) => !["source", "language", "session"].includes(k) && /user/i.test(String(v)),
-);
+// The key name WAS the implementer's to choose while the spec was open; now
+// that it is chosen, the assertion is exact. A loose "some field mentions
+// user" check would let the source label silently fall back to `agent-note`,
+// or an extra key appear, and still pass — and the whole point of this record
+// shape is that a recalled fact carries an honest account of where it came
+// from. Changing the shape on purpose means changing this literal on purpose.
 check(
-	"Cross-project scope is stated: a scope marker identifies the record as user-scoped",
-	scopeKeys.length > 0,
-	true,
-);
-check(
-	"Cross-project scope is stated: the existing source field survives",
-	typeof userMeta.source === "string" && userMeta.source.startsWith("pi-hindsight/"),
-	true,
-);
-check(
-	"Cross-project scope is stated: the existing language field survives",
-	userMeta.language,
-	LANGUAGE,
+	"Cross-project scope is stated: the metadata is exactly the user-note shape",
+	userMeta,
+	{
+		source: "pi-hindsight/user-note",
+		scope: "user",
+		language: LANGUAGE,
+	},
 );
 check(
 	"Cross-project scope is stated: every value is still a string (the API rejects anything else)",

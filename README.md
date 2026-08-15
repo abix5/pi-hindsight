@@ -119,10 +119,11 @@ the bank already matches.
 
 #### What every write carries: `context` and `metadata`
 
-All three write paths — the automatic session note, the agent's deliberate
-`hindsight_retain`, and a document you edited in the Review tab — build their
-`context` and `metadata` from one helper (`src/retain-hygiene.ts`). Neither is
-decoration: Hindsight splices both straight into its own fact-extraction prompt.
+All four write paths — the automatic session note, the agent's deliberate
+`hindsight_retain`, a document you edited in the Review tab, and
+`hindsight_retain_user` — build their `context` and `metadata` from one helper
+(`src/retain-hygiene.ts`). Neither is decoration: Hindsight splices both
+straight into its own fact-extraction prompt.
 
 The `context` does two jobs.
 
@@ -159,10 +160,13 @@ returns 45 keys and no language key among them (verified against a live 0.9.1
 server), so the server's language settings are invisible to the extension.
 Keeping the three in agreement is left to you.
 
-The `metadata` is four fields, stored on every fact the document produces and
-returned with every recalled hit: `source` (which of the three write paths
-wrote it), `project`, `session`, and `language` (the language that was *asked*
-for — without it, a config flipped mid-life is invisible afterwards).
+The `metadata` is stored on every fact the document produces and returned with
+every recalled hit. A **project** write carries four fields: `source` (which
+write path produced it), `project`, `session`, and `language` (the language
+that was *asked* for — without it, a config flipped mid-life is invisible
+afterwards). A **user-bank** write carries `source`, `session`, `language`, and
+`scope: "user"` where the project write puts `project` — naming the checkout
+that happened to be open would assert the opposite of what that bank is for.
 
 ### Review (`/mem` → Review tab)
 
