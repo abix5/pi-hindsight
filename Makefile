@@ -53,6 +53,8 @@ check: ## Typecheck + run the self-tests
 	bun scripts/user-bank.test.ts
 	bun scripts/user-bank-context.test.ts
 	bun scripts/memorize-user-bank.test.ts
+	bun scripts/user-block-epoch.test.ts
+	bun scripts/user-block-widget.test.ts
 	bun scripts/delta-window.test.ts
 	bun scripts/restore-killed-fact.test.ts
 	npm test
