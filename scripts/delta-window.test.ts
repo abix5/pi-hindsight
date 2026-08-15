@@ -46,36 +46,47 @@ check("plain window stops before the boundary", ids(win(session, "a", "d")), [
 	"c",
 ]);
 
-check("no watermark starts at the beginning", ids(win(session, undefined, "c")), [
-	"a",
-	"b",
-]);
+check(
+	"no watermark starts at the beginning",
+	ids(win(session, undefined, "c")),
+	["a", "b"],
+);
 
 // The live case: a flush to the session end put the watermark on "e", then a
 // later compaction's boundary landed back at "c".
-check("watermark past boundary yields nothing", ids(win(session, "e", "c")), []);
+check(
+	"watermark past boundary yields nothing",
+	ids(win(session, "e", "c")),
+	[],
+);
 
 // ...and that is exactly when the unbounded window still has work in it. This
 // pair is the discriminator: bounded empty + unbounded non-empty = "already
 // saved through the live tail", NOT "nothing new".
 const grown = [...session, entry("f"), entry("g")];
 check("bounded window is empty", ids(win(grown, "e", "c")), []);
-check("unbounded window shows the pending tail", ids(win(grown, "e", undefined)), [
-	"f",
-	"g",
-]);
+check(
+	"unbounded window shows the pending tail",
+	ids(win(grown, "e", undefined)),
+	["f", "g"],
+);
 
 // A genuinely idle session: both windows empty, so the "nothing new" advice is
 // the correct one and /mem-save all is safe to suggest.
-check("idle session is empty either way", ids(win(session, "e", undefined)), []);
+check(
+	"idle session is empty either way",
+	ids(win(session, "e", undefined)),
+	[],
+);
 
 // A missing watermark (compaction dropped the entry it named) must not silently
 // re-collect from zero on a bounded window — it starts at the beginning, which
 // the caller bounds with the boundary.
-check("unknown watermark falls back to the start", ids(win(session, "zz", "c")), [
-	"a",
-	"b",
-]);
+check(
+	"unknown watermark falls back to the start",
+	ids(win(session, "zz", "c")),
+	["a", "b"],
+);
 
 console.log(failures === 0 ? "\nALL PASS" : `\n${failures} FAILURE(S)`);
 process.exit(failures === 0 ? 0 : 1);
