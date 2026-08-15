@@ -148,6 +148,15 @@ export default function (pi: ExtensionAPI) {
 	let client: HindsightClient | undefined;
 	const getState = () => (cfg && client ? { cfg, client } : undefined);
 
+	// The second client exists only when a user bank was declared, so the default
+	// config makes no extra client, no extra tool and no extra request. It is handed
+	// straight to registerTools and nowhere else — in particular the Memorizer never
+	// sees it, which is why the automatic write path cannot address the user bank.
+	const userBankOf = (c: HindsightConfig | undefined) =>
+		c?.userBankId
+			? { cfg: c, client: new HindsightClient({ ...c, bankId: c.userBankId }) }
+			: undefined;
+
 	// Mode guard: when pi opens THIS plugin's own dev checkout, the project's
 	// local `.pi/extensions/hindsight.ts` loads the working-tree source. If the
 	// published package is ALSO installed globally, both copies would load in the
@@ -186,7 +195,7 @@ export default function (pi: ExtensionAPI) {
 		} catch {
 			/* getState stays undefined; tools then report "not initialized" */
 		}
-		registerTools(pi, getState);
+		registerTools(pi, getState, userBankOf(cfg));
 		return;
 	}
 
@@ -305,7 +314,15 @@ export default function (pi: ExtensionAPI) {
 		countsTimer.unref?.();
 	};
 
-	registerTools(pi, getState);
+	// Resolved at load time from the launch cwd: the tool list is fixed before the
+	// first session starts, so it cannot be rebuilt from the session's config later.
+	let loadCfg: HindsightConfig | undefined;
+	try {
+		loadCfg = loadConfig(process.cwd());
+	} catch {
+		/* no config readable here; the user tool simply is not offered */
+	}
+	registerTools(pi, getState, userBankOf(loadCfg));
 	registerCommands(pi, getState, () => memorizer, status, runtime);
 
 	pi.on("session_start", async (_event, ctx) => {

@@ -55,6 +55,11 @@ function fail(text: string) {
 export function registerTools(
 	pi: ExtensionAPI,
 	getState: () => { cfg: HindsightConfig; client: HindsightClient } | undefined,
+	// The user bank arrives as a resolved client, not as a lookup: it is reachable
+	// from exactly this one closure, which is what keeps every automatic write path
+	// structurally unable to address it. Undefined when no user bank is declared,
+	// and then the tool below does not exist at all.
+	userBank?: { cfg: HindsightConfig; client: HindsightClient },
 ): void {
 	pi.registerTool({
 		name: "hindsight_retain",
@@ -105,6 +110,50 @@ export function registerTools(
 			}
 		},
 	});
+
+	if (userBank) {
+		pi.registerTool({
+			name: "hindsight_retain_user",
+			label: "Retain (user)",
+			description:
+				"Store a standing fact about the USER — how this person works — in cross-project user memory, separate from the project bank. Goes here: standing instructions that hold everywhere (e.g. 'always start from a fresh master'), tool and model preferences, communication and report-language rules, goals and intent that explain WHY things are asked for, prohibitions and boundaries, and habitual procedures repeated from project to project. Does NOT go here: anything bound to one repository — paths, filenames, versions, commit ids, branch names, build layout, this project's error text — all of which belong to the project bank even when they come up in a conversation about habits. One-sentence test: would this still be true when the person opens a completely different repository? Yes → user bank. No → project bank.",
+			promptGuidelines: [
+				"When the user states something about how THEY work rather than about this code — a standing instruction, a preference, a goal, a prohibition, a habitual procedure — call hindsight_retain_user; project facts still go to hindsight_retain.",
+				"Apply the one-sentence test before writing: would this still be true in a completely different repository? If no, it belongs in the project bank.",
+				"Phrase it as a rule with its reason, not as a retelling of a remark. Bad: 'the user said to work from master'. Good: 'Start any work from a fresh origin/HEAD, because a branch cut from a stale base drags unrelated changes into its diff'.",
+			],
+			parameters: RetainParams,
+			async execute(_id, params, signal) {
+				const kind = params.kind ?? "fact";
+				const cwd = process.cwd();
+				try {
+					// Same hygiene as the project retain — context, metadata and memory
+					// language all come from the shared module, so the two write paths
+					// differ in their bank and tags and in nothing else.
+					const provenance = {
+						project: path.basename(cwd),
+						language: userBank.cfg.memoryLanguage,
+					};
+					await userBank.client.retain(
+						params.content,
+						{
+							tags: [userBank.cfg.userBankId, "user-manual", kind],
+							context: retainContext("agent-note", provenance),
+							metadata: retainMetadata("agent-note", provenance),
+						},
+						signal,
+					);
+					appendDebug(cwd, "tool.retain-user.done", { kind });
+					return ok("retained");
+				} catch (err) {
+					appendDebug(cwd, "tool.retain-user.error", {
+						error: (err as Error).message,
+					});
+					return fail(`retain failed: ${(err as Error).message}`);
+				}
+			},
+		});
+	}
 
 	pi.registerTool({
 		name: "hindsight_recall",
