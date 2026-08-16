@@ -13,7 +13,7 @@
 LOADER   := .pi/extensions/hindsight.ts
 DISABLED := .pi/extensions/hindsight.ts.disabled
 
-.PHONY: help dev global status install-global remove-global check publish
+.PHONY: help dev global status install-global remove-global check shots publish
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -62,3 +62,18 @@ check: ## Typecheck + run the self-tests
 
 publish: check ## Typecheck, then publish to npm (needs auth)
 	npm publish
+
+# vhs drives a real terminal in a headless browser, so colour emoji come out
+# the way a user's terminal draws them (freeze tints glyph outlines instead —
+# a blue brain). The tape prints the REAL output of scripts/widget-shots.ts;
+# imagemagick takes the last GIF frame, trims it to the content and re-pads it.
+shots: ## Regenerate the README screenshots from the shipped code (needs vhs + imagemagick)
+	@mkdir -p docs/assets
+	@for s in $$(bun scripts/widget-shots.ts --list); do \
+	  echo "shot: $$s"; \
+	  SHOT=$$s vhs docs/shots.tape -q || exit 1; \
+	  magick /tmp/hindsight-shot.gif -coalesce -delete 0--2 -fuzz 10% -trim +repage \
+	    -bordercolor '#171717' -border 48 "docs/assets/$$s.png" || exit 1; \
+done
+	@rm -f /tmp/hindsight-shot.gif
+	@ls -la docs/assets/*.png

@@ -1,145 +1,151 @@
 # pi-hindsight
 
+[![npm](https://img.shields.io/npm/v/%40abix5%2Fpi-hindsight)](https://www.npmjs.com/package/@abix5/pi-hindsight)
+[![license: MIT](https://img.shields.io/npm/l/%40abix5%2Fpi-hindsight)](https://github.com/abix5/pi-hindsight/blob/main/LICENSE)
+
 Long-term memory for the [pi coding-agent](https://github.com/earendil-works/pi),
-backed by a local [Hindsight](https://github.com/threadway/hindsight) instance.
+backed by a local [Hindsight](https://github.com/threadway/hindsight) instance:
+a durable memory of your project that survives sessions and context compaction,
+searched and injected before each turn (**recall**), distilled and stored in the
+background — never blocking the agent — when context is about to be discarded
+(**memorize**).
 
-> **Need Hindsight running first?** On macOS the fastest way to spin up a local
-> instance is [**hindsight-setup**](https://github.com/abix5/hindsight-setup) —
-> simple and quick.
+> [!TIP]
+> Need Hindsight running first? On macOS the fastest way to a local instance
+> (v0.8.4+ recommended) is
+> [**hindsight-setup**](https://github.com/abix5/hindsight-setup) — simple and quick.
 
-The extension gives the agent a durable memory of your project that survives
-sessions and context compaction. Before each turn it searches the memory bank
-and injects the few most relevant facts (**recall**); when the conversation is
-compacted, saved on demand, or the session ends, it extracts the durable
-knowledge from the slice about to be discarded, de-duplicates it against the
-bank, and stores only what is new — in the background, never blocking the agent
-(**memorize**). A one-line widget shows both contours live:
+## What a session looks like
 
-```
-🧠 ● pi-hindsight ↙↗ 16d 153f · ↙ recall · 12→3 · db migration command
-```
+![A session from start to a background write](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/session.png)
+
+Every shot here is the real widget, rendered by the shipped code. Recall's
+survivors arrive as a small untrusted-reference block in the turn's context;
+the write happens off to the side — the only trace of either is this line
+changing. The `/mem` panel (`alt+h`) covers status, settings, review and
+history; its Status tab shows which config file is which:
+
+![The /mem panel, Status tab](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/mem-status.png)
+
+## Widget legend
+
+One fixed line: `🧠` · bank dot (`●` connected, `◐` checking, `○` not yet,
+`⟳` working) · bank id · auto-mode arrows · bank size (`16d` documents, `153f`
+facts) · user-block state · last action. The arrows `↙` (recall) and `↗`
+(retain) are bright while both contours are on and go dim as soon as either is
+off. What each state should tell you:
+
+![idle](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-idle.png)  
+Idle and connected: green dot, bright `↙↗`, 16 documents / 153 facts in the bank.  
+![recall injected](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-recall-injected.png)  
+Recall queried the bank about your message, found 12 facts and injected the 3 that survived the relevance judge.  
+![recall found nothing](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-recall-nothing.png)  
+Recall ran and found nothing relevant — nothing was injected, no context was spent.  
+![write in progress](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-writing.png)  
+`⟳`: a compaction is being distilled into memory right now, in the background.  
+![write done](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-stored.png)  
+The write landed: 2 documents, 9 lines of durable knowledge, upserted into the bank.  
+![write error](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-write-error.png)  
+A write failed and the red `↗!` tail says why; the green dot says the bank itself is fine.  
+![retired facts](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-retired.png)  
+This write also retired 3 obsolete facts (`153f↓3`); the badge accumulates all session, so a kill cannot scroll away unread.  
+![user block states](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-user-block.png)  
+The four user-block readings: `≡4` — 4 facts frozen into this epoch's prompt; `≡4→` — the bank has moved on, the prompt follows at the next epoch; `≡!` — a block was asked for and could not be delivered; `≡–` — nobody asked for one.  
+![paused](https://raw.githubusercontent.com/abix5/pi-hindsight/main/docs/assets/widget-paused.png)  
+`/mem-auto off`: everything dims and the cue reads `auto off` — a choice, not a fault.
 
 ## The two banks
 
-Memory lives in a **project bank** and, optionally, a shared **user bank**.
-
-The project bank holds knowledge about the repository you are in: decisions and
-their rationale, constraints, verified know-how, pitfalls, concrete locations.
-Both the automatic write path and the agent's `hindsight_retain` tool write
-here, and per-turn recall reads from here.
-
-The user bank holds standing facts about the **person** — facts that stay true
-in any repository: how you like to work, your tools, your prohibitions. Enable
-it with `userBankId` (or `HINDSIGHT_USER_BANK`); an empty value keeps the
-single-bank behaviour exactly as before. When set, the agent gains a dedicated
-write tool, `hindsight_retain_user`. The automatic capture pipeline is wired to
-the project bank only and structurally cannot reach the user bank — nothing
-lands there unless the tool is called deliberately.
+Memory lives in a **project bank** and, optionally, a shared **user bank**. The
+project bank holds knowledge about the repository you are in — decisions and
+their rationale, constraints, verified know-how, pitfalls; the automatic write
+path, the `hindsight_retain` tool and per-turn recall all work against it. The
+user bank holds standing facts about the **person**, true in any repository —
+how you like to work, your tools, your prohibitions. Enable it with `userBankId`
+(or `HINDSIGHT_USER_BANK`) and the agent gains a dedicated write tool,
+`hindsight_retain_user` — the only path that can reach the user bank: the
+automatic pipeline is wired to the project bank and structurally cannot touch it.
 
 ## The user block in the system prompt
 
-What the user bank knows can be placed straight into the agent's instructions.
-Put a marker in an `AGENTS.md` the agent already loads (the global
-`~/.pi/agent/AGENTS.md` is the natural home) and the extension replaces it with
-a `<user_profile>` block built from the user bank.
-
-The multi-line and single-line forms produce identical bytes. Exactly one
-selector is allowed; a marker with anything unparsed in it is refused whole —
-nothing is fetched on its behalf, and the marker is taken out of the prompt
-rather than passed to the model, which could not tell that it had been rejected.
-Your file is never edited, so the mistake stays where its author can see it, and
-you are told about it once per session.
+What the user bank knows can be placed straight into the agent's instructions:
+put a marker in an `AGENTS.md` the agent already loads and the extension
+replaces it with a `<user_profile>` block built from the user bank. Three forms
+exist (single-line and multi-line spellings produce identical bytes):
 
 ```markdown
-<!-- hindsight:user -->                        bare: the bank's stated facts
+<!-- hindsight:user -->                      bare: the bank's stated facts
+<!-- hindsight:user model: user-profile -->  a Hindsight mental model (one GET)
+<!-- hindsight:user query: … limit: 5 -->    live recall; limit caps the facts
 
-<!-- hindsight:user model: user-profile -->    a Hindsight mental model,
-                                               fetched with one plain GET
+<!-- …and where it goes, e.g. in ~/.pi/agent/AGENTS.md: -->
+## About the person you work for
 
 <!-- hindsight:user
-  query: how does this person prefer to receive reports?
+  query: how does this person like to work and receive results?
   limit: 5
--->                                            a live recall; limit caps the
-                                               facts kept (only with query:)
+-->
 ```
 
-The block is frozen byte-for-byte for a whole **epoch**, and there are exactly
-two epoch boundaries: session start and a completed compaction. The reason is
-cost: the provider caches the system-prompt prefix, and content that changed
-between turns would invalidate that cache on every turn and multiply the price
-of a long session several-fold.
+The block is frozen byte-for-byte for a whole **epoch** — session start and a
+completed compaction are the only two boundaries. The reason is cost: the
+provider caches the system-prompt prefix, and content that changed between
+turns would invalidate that cache on every turn and multiply the price of a
+long session several-fold. So a fact written now appears at the next boundary
+— the widget's `≡` fragment (gallery above) tells "deferred" from "broken".
 
-When a parsed marker cannot be answered — no server, an empty bank, a mental
-model still generating — the marker is **removed** from the prompt rather than
-left in it: it is a note addressed to the extension, not to the model. Nothing
-about the failure reaches the model's context; you are warned once per session
-instead. Within a session, a block built at an earlier boundary survives a
-failed one as a stale cache.
-
-The widget reports the block's state: `≡ 4 facts in prompt this epoch` (frozen
-and injected), `≡ 4 facts · update next epoch` (the bank moved on; the prompt
-follows at the next boundary — writing with `hindsight_retain_user` never
-changes the current prompt), `≡ user block unavailable` (asked for and not
-delivered), and `≡ no user block` (nothing was asked for). The widget head
-compresses the same four readings to `≡4`, `≡4→`, `≡!`, and `≡–`.
+> [!NOTE]
+> A marker is a note addressed to the extension, not to the model. One selector
+> only; a marker with anything unparsed is refused whole, and a parsed marker
+> that cannot be answered (no server, empty bank, a model still generating) is
+> **removed** from the prompt rather than left in it. Your file is never edited
+> — you are warned once per session instead, and a block built at an earlier
+> boundary survives a failed one as a stale cache.
 
 ## How it works
 
-### Recall (read path)
+**Recall (read path).** Before each turn a cheap model distils the message plus
+recent context into a few standalone bank queries, runs them in parallel, judges
+the hits for relevance, and injects the survivors verbatim — capped at
+`recallMaxLines`, de-duplicated against what the session already saw. At a task
+boundary a detector triggers a deeper pass: one coherent briefing, not bullets.
 
-Recall runs before each agent turn on a cheap model: it distils the message
-plus recent context into a few standalone bank queries, runs them in parallel,
-has the model judge each query's hits for relevance, and injects the surviving
-facts verbatim as an untrusted-reference block — capped at `recallMaxLines`,
-de-duplicated against what this session already saw. When nothing relevant is
-found, nothing is injected. At a task boundary (a separate detector notices the
-subject changed) a deeper pass runs a wider recall and injects one coherent
-briefing instead of loose bullets.
-
-### Memorize (write path)
-
-Memorize fires on compaction, on `/mem-save`, and as a safety net when a
-session quits. The whole pipeline — extract, merge, verify, bank-aware dedup,
-store — runs inside the extension via isolated model calls; no agent turn, no
-context pollution. Every write carries a deterministic `document_id`, so a
-retried write upserts instead of duplicating.
+**Memorize (write path).** Fires on compaction, on `/mem-save`, and as a safety
+net when a session quits. Extract, merge, verify, bank-aware dedup, store — all
+inside the extension via isolated model calls: no agent turn, no context
+pollution. Every write carries a deterministic `document_id`, so a retried
+write upserts instead of duplicating. What gets stored is facts only, never
+invented: goals, decisions with rationale, constraints, verified know-how,
+pitfalls, non-obvious locations — never code diffs, raw tool output, chatter,
+unexecuted plans, or secret values (only where a secret lives). Each candidate
+is kept only if a future agent knowing it would act differently, and all memory
+is written in one configured language, so the same fact never exists in two
+tongues.
 
 ### Letting a fact die
 
 A bank that only grows eventually asserts things that stopped being true, so
-the write path may retire a bank fact (`factInvalidation`, on by default) —
-but only an orphan that consolidation can never fix, such as a duplicate or a
-fact about deleted code, and only with a verbatim transcript quote as
-evidence, re-checked in code before the kill. A failure here never costs the
-write itself. Every kill is auditable: `/mem` → Log shows it as a `↓ … retire`
-row with the quote that condemned it, and pressing `u` on that row puts every
-fact the entry killed back into the bank and into recall — one keypress,
+the write path may retire a bank fact (`factInvalidation`, on by default) — but
+only an orphan that consolidation can never fix, such as a duplicate or a fact
+about deleted code, and only with a verbatim transcript quote as evidence,
+re-checked in code before the kill. A failure here never costs the write
+itself. Every kill is auditable: `/mem` → Log shows it as a `↓ … retire` row
+with the quote that condemned it, and pressing `u` on that row puts every fact
+the entry killed back into the bank and into recall — one keypress,
 row-granular — while a `restore` entry is appended to the log so the history
 stays honest. Set `HINDSIGHT_FACT_INVALIDATION=0` if you would rather your
 facts never die.
 
 ### Review (`/mem` → Review tab)
 
-Every stored document also lands in a global review queue. The `/mem` panel's
-Review tab walks pending documents so you can approve, edit (re-stored under
-the same id, replacing the old facts), or delete them. An entry nobody touches
-for 7 days is approved automatically (`reviewAutoApproveDays`; `0` keeps
-everything pending). That costs nothing: the document was already stored in
-the bank the moment it was enqueued, so approval leaves the bank untouched —
-delete is the only action that removes anything. The review log records who
-ended a review: an entry without a name means a person did it, `expiry` or
-`auto` means the machinery did. Since 0.4.1 the memory-collection notice in
-the chat also no longer doubles its 🧠 emoji next to the widget's.
-
-## Requirements
-
-- **pi coding-agent** and **bun** (the extension runs as TypeScript).
-- A running **Hindsight** HTTP API — by default `http://localhost:8888`,
-  namespace `default`. On macOS, use
-  [**hindsight-setup**](https://github.com/abix5/hindsight-setup); v0.8.4+ is
-  recommended.
-- A small model in your pi registry for the recall/write pipeline; one cheap
-  model for both roles is enough.
+Every stored document also lands in a global review queue, and the Review tab
+walks the pending ones: approve, edit (re-stored under the same id, replacing
+the old facts), or delete. An entry nobody touches for 7 days is approved
+automatically (`reviewAutoApproveDays`; `0` keeps everything pending forever)
+— safe, because the document was already stored in the bank the moment it was
+enqueued: approval leaves the bank untouched, and delete is the only action
+that removes anything. In the review log, an entry without a name means a
+person ended the review; `expiry` or `auto` means the machinery did.
 
 ## Install
 
@@ -147,28 +153,38 @@ the chat also no longer doubles its 🧠 emoji next to the widget's.
 pi install npm:@abix5/pi-hindsight
 ```
 
-The package declares `pi.extensions`, so this registers the extension
-automatically. (Manual alternative: `npm install -D @abix5/pi-hindsight` and a
-one-line loader at `.pi/extensions/hindsight.ts` re-exporting the package.)
+You need **pi**, **bun**, a running Hindsight HTTP API, and one small model in
+your pi registry for both pipeline roles. Installing registers the extension
+(`pi.extensions`); set your models once in the global config, declare a bank in
+the project config, and `/reload`.
 
-Then set your models once in the global `~/.pi/agent/hindsight.json`, declare a
-bank in the project's `.pi/hindsight.json`, and `/reload`. Without a project
-bank the plugin stays **dormant** — no recall, no widget — so the extension is
-safe to keep installed globally and only wakes in projects that opt in. Open
-`/mem` → Status to confirm the connection; the Settings tab edits everything
-visually and writes each preference to the right file.
+> [!NOTE]
+> Without a project bank the plugin stays **dormant** — no recall, no widget —
+> so it is safe to keep installed globally: it only wakes in projects that
+> declare a `bankId`. Open `/mem` → Status to confirm the connection.
+
+## Where config and state live
+
+Config merges three layers, later wins: env defaults → global file → project
+file. Edit the global file for infrastructure shared by every project and the
+project file for what belongs to one repository — or let the `/mem` Settings
+tab write each preference to the right file for you.
+
+| Path | What lives there |
+| --- | --- |
+| `~/.pi/agent/hindsight.json` | Global config: models, `baseUrl`, `userBankId` — infrastructure |
+| `<project>/.pi/hindsight.json` | Project config: the `bankId` and per-project overrides |
+| `~/.pi/hindsight/review-queue.jsonl` | Review queue — per user, spans all projects |
+| `<project>/.pi/hindsight/log.jsonl` | Write/recall log shown in `/mem` → Log |
+| `<project>/.pi/hindsight/delta/` | Collected context chunks awaiting the next write |
+| `<project>/.pi/hindsight/debug.log` | Verbose debug log — exists only with `debug` on |
 
 ## Configuration
 
-Config merges three layers, later wins: env defaults → global
-`~/.pi/agent/hindsight.json` → project `.pi/hindsight.json`. Keep shared
-settings global; keep only the bank (and project-specific overrides) in the
-project file.
-
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
-| `bankId` | `HINDSIGHT_BANK` | — (dormant) | Project bank id; set it (or `"auto"` for a folder-derived id) to activate the plugin |
-| `userBankId` | `HINDSIGHT_USER_BANK` | `""` (off) | User bank; adds `hindsight_retain_user` and enables the user block |
+| `bankId` | `HINDSIGHT_BANK` | — (dormant) | Project bank id; set it (or `"auto"` for a folder-derived id) to activate |
+| `userBankId` | `HINDSIGHT_USER_BANK` | `""` (off) | User bank; adds `hindsight_retain_user` and the user block |
 | `baseUrl` | `HINDSIGHT_BASE_URL` | `http://localhost:8888` | Hindsight API base URL |
 | `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace |
 | `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn |
@@ -183,8 +199,8 @@ project file.
 | `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging — may leak sensitive data |
 
 Everything else — fact categories, recall effort and budgets, model fallback
-chains, missions, the task detector, the bank reminder — has sensible defaults
-and is edited in the `/mem` panel's Settings tab.
+chains, missions, the task detector — has sensible defaults and is edited in
+the `/mem` Settings tab.
 
 Keep `memoryLanguage` in agreement with the server, which has its own two
 language switches: `HINDSIGHT_API_LLM_OUTPUT_LANGUAGE` forces the language of
@@ -196,52 +212,29 @@ extension cannot verify the agreement: `GET /v1/{ns}/banks/{bank}/config`
 returns no language key at all, so keeping the three settings in agreement is
 left to the reader.
 
-## Commands & shortcuts
+## Commands & tools
 
 | Command | What it does |
 | --- | --- |
-| `/mem` | Open the panel: Status · Settings · Review · Log. The single place for configuration, review, history and health. `alt+h` opens it too. |
-| `/mem-save [all]` | Save the accumulated context now; `all` re-collects the whole session cleanly. |
-| `/mem-retain <prompt>` | Have the agent study something and store it immediately. |
-| `/mem-recall <query>` | Ad-hoc search of the project bank. |
-| `/mem-mark` | Mark everything up to now as processed without writing. |
-| `/mem-auto [on\|off\|recall\|retain]` | Toggle the automatic contours for this session only. |
+| `/mem` (or `alt+h`) | The panel: Status · Settings · Review · Log |
+| `/mem-save [all]` | Save the accumulated context now; `all` re-collects the whole session |
+| `/mem-retain <prompt>` | Have the agent study something and store it immediately |
+| `/mem-recall <query>` | Ad-hoc search of the project bank |
+| `/mem-mark` | Mark everything up to now as processed without writing |
+| `/mem-auto [on\|off\|recall\|retain]` | Toggle the automatic contours for this session |
 
 The agent itself gets `hindsight_recall`, `hindsight_reflect`,
 `hindsight_retain`, and — with a user bank — `hindsight_retain_user`. For
 spawned agents that must stay silent, the `--mem-only-tools` CLI flag registers
 the tools and nothing else: no widget, no hooks, no automatic memory.
 
-## What gets stored
-
-Facts only, extracted from the actual conversation and never invented: goals,
-decisions with rationale, standing constraints, verified know-how, pitfalls,
-and non-obvious facts and locations. Never stored: code diffs, raw tool
-output, chatter, unexecuted plans, transient details, or secret values — only
-where a secret lives. Every candidate must pass a future-value test: kept only
-if a future agent knowing it would act differently. All memory is written in
-one configured language regardless of the conversation's language, so the same
-fact never exists in two tongues.
-
-## Widget legend
-
-One fixed line: `🧠` · bank dot (`●` connected, `◐` checking, `○` not yet,
-`⟳` working) · bank id · auto-mode · bank size (`16d` documents, `153f` facts)
-· user-block state (see above; only with a `userBankId`) · last action. The
-auto-mode markers `↙` (recall) and `↗` (retain) are bright while both contours
-are on and dim as soon as either is off. The action tail reads like
-`↙ recall · 12→3 · <query>` (found 12, injected 3), `↗ stored 1 doc · 9 lines`,
-`↗ nothing new to store`, or `↗! <error>` when a write failed.
-
 ## Development
 
 ```bash
 bun install     # dev types only; pi provides the runtime packages
 make check      # typecheck + self-tests
+make shots      # re-render the README images from src/ui.ts (never hand-drawn)
 ```
 
 Source lives in `src/`; after editing, `/reload` in pi — no build step.
-
-## License
-
-MIT — see [LICENSE](./LICENSE).
+Licensed [MIT](https://github.com/abix5/pi-hindsight/blob/main/LICENSE).
