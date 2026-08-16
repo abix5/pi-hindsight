@@ -20,6 +20,17 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+
+// The Log tab shares its one message line with the Review tab's "N document(s)
+// pending review" notice, and the queue behind that notice lives in the real
+// home directory unless this is set. Without it the assertions below read the
+// developer's own queue: green on an empty one, red the moment real work has
+// piled up — a verdict about the machine, not about the code. Set before the
+// panel is imported; queuePath() reads the variable at call time.
+process.env.HINDSIGHT_REVIEW_QUEUE = path.join(
+	fs.mkdtempSync(path.join(os.tmpdir(), "restore-fact-queue-")),
+	"review-queue.jsonl",
+);
 import { fileURLToPath } from "node:url";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import type { HindsightConfig } from "../src/config.ts";
