@@ -49,6 +49,7 @@ check: ## Typecheck + run the self-tests
 	bun scripts/bank-reminder.test.ts
 	bun scripts/fact-invalidation.test.ts
 	bun scripts/widget.test.ts
+	bun scripts/recall-block.test.ts
 	bun scripts/write-hygiene.test.ts
 	bun scripts/user-bank.test.ts
 	bun scripts/user-bank-context.test.ts
