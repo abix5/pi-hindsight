@@ -270,6 +270,18 @@ export default function (pi: ExtensionAPI) {
 	// now is exactly the mid-epoch rewrite this design exists to avoid — but the
 	// user is owed the fact that what they just stored lands at the next boundary.
 	let userBlockStale = false;
+	/**
+	 * The epoch's answer to "does this session inject at all", and whether it has
+	 * been taken yet.
+	 *
+	 * Taken on the epoch's FIRST turn, because a boundary has no prompt to look at,
+	 * and then held. The bytes of the block are frozen; the decision to use them has
+	 * to be frozen with them, or a marker that appears mid-epoch would add the block
+	 * to the cached prefix between two turns — the rewrite this whole contour exists
+	 * to avoid, arriving through the one door left open.
+	 */
+	let epochDecided = false;
+	let epochInjects = false;
 	// Rows the bank may return for the block. Generous next to the size ceiling that
 	// actually bounds it, so the ceiling — not the page size — decides what is kept.
 	const USER_BLOCK_LIMIT = 200;
@@ -322,6 +334,9 @@ export default function (pi: ExtensionAPI) {
 	 * "no block" and the prompt is left untouched, marker and all.
 	 */
 	const openUserEpoch = async (cwd: string, reason: string) => {
+		// A new epoch retakes the decision — including after a failed read, where the
+		// previous block stays in force but this session may now carry the marker.
+		epochDecided = false;
 		if (standDown) return;
 		const ub = userBankOf(cfg);
 		if (!ub) return; // no user bank declared: no request, no widget, no injection
@@ -570,8 +585,13 @@ export default function (pi: ExtensionAPI) {
 		// Remembered for the NEXT boundary, never acted on here: reading the bank
 		// now is the mid-epoch prompt rewrite this whole design exists to avoid.
 		if (event.systemPrompt?.includes(USER_BLOCK_MARKER)) markerSeen = true;
-		const next = userBlock
-			? applyUserBlock(event.systemPrompt ?? "", userBlock)
+		if (!epochDecided) {
+			epochDecided = true;
+			epochInjects =
+				!!userBlock && applyUserBlock(event.systemPrompt ?? "", "") !== undefined;
+		}
+		const next = epochInjects
+			? applyUserBlock(event.systemPrompt ?? "", userBlock ?? "")
 			: undefined;
 		// The widget reports what actually happened to THIS prompt, not what was read
 		// at the boundary: a bank full of facts and instructions carrying no marker

@@ -83,8 +83,20 @@ const ALL_GOOD = { exactlyOneLine: true, withinBudget: true, intactAnsi: true };
  * exact wording is the implementation's to choose; what the specification
  * demands is that the deferral is said at all, in one of these registers.
  */
-const DEFERRAL =
-	/(next|later|pending|boundary|compact|freeze|frozen|restart|reload|epoch|след|позж|границ|компакт|заморож|отлож|⟳|↻|⟲|↦|⏳)/i;
+/**
+ * The register that says a change is WAITING: not merely that the reading is
+ * epoch-scoped, but that something already written lands later.
+ *
+ * The exact wording stays the implementation's to choose; what the specification
+ * demands is that the deferral is said at all. The test deliberately does NOT
+ * forbid the injected line from naming the epoch on its own — that line is a
+ * snapshot from the last boundary, and a person who edits the bank from another
+ * session gets no staleness signal at all, so "this epoch" is the only thing
+ * telling them what they are looking at. What must be new after a write is the
+ * statement that something is queued, and measuring exactly that keeps the
+ * check honest: blunt the stale line into the plain one and this check fails.
+ */
+const PENDING_CHANGE = /(next|later|pending|след|позж|отлож|⟳|↻|⟲|↦|⏳)/i;
 
 // ================= Requirement: One-line widget disclosing the block's state
 
@@ -129,14 +141,25 @@ check(
 // --- Scenario: Bank changed after the freeze
 // Nothing re-reads the bank inside an epoch, so the widget cannot report the
 // new content — it has to report the RULE instead: what you just wrote lands at
-// the next boundary.
+// the next boundary. The change is made the way the model makes one, through
+// the extension's own user-bank write tool: mutating the fake bank behind its
+// back changes nothing the extension can know about, and a check written that
+// way would pass without the disclosure ever being produced.
 {
 	arm();
 	const h = newHarness({ cwd: makeCwd("widget-frozen", {}) });
 	await h.start();
 	const first = await h.turn(HOST);
-	const before = (h.widget() ?? [])[0] ?? "";
+	const beforeWrite = (h.widget() ?? [])[0] ?? "";
+
 	bank.user.items = bankOf(["UB-BRAND-NEW", "UB-ALSO-NEW"]);
+	const wrote = await h.callTool("hindsight_retain_user", {
+		content:
+			"The person wants the widget to say when a stored fact reaches the prompt.",
+		kind: "fact",
+	});
+	const afterWrite = (h.widget() ?? [])[0] ?? "";
+
 	const later: string[] = [];
 	for (let i = 0; i < 5; i += 1) {
 		await h.turn(HOST);
@@ -149,14 +172,23 @@ check(
 		{
 			...geometry(lines),
 			injected: first.returned,
-			saysWhenItLands: DEFERRAL.test(strip(before)),
-			steadyWhileFrozen: later.every((l) => l === before),
-			doesNotShowTheUnreadFacts: strip(before).includes("BRAND-NEW"),
+			writeSucceeded: wrote,
+			// The disclosure has to be NEW: an injected line that already talked
+			// about deferral would satisfy the regex without the write meaning
+			// anything, so the before-line is required not to match it.
+			saidNothingAboutDeferralBefore: PENDING_CHANGE.test(strip(beforeWrite)),
+			saysWhenItLands: PENDING_CHANGE.test(strip(afterWrite)),
+			changedOnTheWrite: afterWrite !== beforeWrite,
+			steadyWhileFrozen: later.every((l) => l === afterWrite),
+			doesNotShowTheUnreadFacts: strip(afterWrite).includes("BRAND-NEW"),
 		},
 		{
 			...ALL_GOOD,
 			injected: true,
+			writeSucceeded: "retained",
+			saidNothingAboutDeferralBefore: false,
 			saysWhenItLands: true,
+			changedOnTheWrite: true,
 			steadyWhileFrozen: true,
 			doesNotShowTheUnreadFacts: false,
 		},

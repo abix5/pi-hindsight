@@ -151,6 +151,117 @@ const control = { injects: false, reads: 0 };
 	h.done();
 }
 
+// --- Scenario: The marker bytes appear inside prose, not as a line of their own
+// The marker is documented, so instructions legitimately talk ABOUT it: the
+// README shows it, and an AGENTS.md may quote it while explaining what it does.
+// Only a line that IS the marker is a substitution point; splicing a multi-line
+// block into the middle of someone's sentence would rewrite an instruction that
+// was never addressed to us.
+{
+	arm();
+	const quoted = [
+		"# Agent Instructions",
+		"",
+		`Write the line ${MARKER} where the profile should appear.`,
+		"",
+		MARKER,
+		"",
+		`Inline mentions such as ${MARKER} inside a sentence are left alone.`,
+		"",
+	].join("\n");
+	const host = hostPrompt(quoted);
+	const h = newHarness({ cwd: makeCwd("inline", {}, quoted) });
+	await h.start();
+	const t = await h.turn(host);
+	const lines = t.final.split("\n");
+	h.done();
+	check(
+		"The marker bytes inside prose are not a substitution point: only the marker line is replaced",
+		{
+			returned: t.returned,
+			blockLandedSomewhere: t.final.includes(
+				'<user_profile source="hindsight:user"',
+			),
+			proseSentenceIntact: lines.includes(
+				`Write the line ${MARKER} where the profile should appear.`,
+			),
+			trailingMentionIntact: lines.includes(
+				`Inline mentions such as ${MARKER} inside a sentence are left alone.`,
+			),
+			standaloneMarkerConsumed: !lines.includes(MARKER),
+		},
+		{
+			returned: true,
+			blockLandedSomewhere: true,
+			proseSentenceIntact: true,
+			trailingMentionIntact: true,
+			standaloneMarkerConsumed: true,
+		},
+	);
+}
+
+// --- Scenario: A row the block cannot positively identify
+// The system prompt is standing instruction text, not a recall list a reader
+// can discount. A row whose type is not the stated `world` fact, or whose type
+// or state the server did not send, is a row we cannot vouch for — and it must
+// not become an instruction about the person.
+{
+	arm([
+		{
+			id: "00000000-0000-4000-8000-000000000001",
+			text: "UB-STATED: the person expects the shortest diff that actually works.",
+			fact_type: "world",
+			state: "valid",
+		},
+		{
+			id: "00000000-0000-4000-8000-000000000002",
+			text: "UB-UNKNOWN-TYPE: a row of some type this code has never heard of.",
+			fact_type: "speculation",
+			state: "valid",
+		},
+		{
+			id: "00000000-0000-4000-8000-000000000003",
+			text: "UB-NO-TYPE: a row that arrived without a fact_type at all.",
+			state: "valid",
+		},
+		{
+			id: "00000000-0000-4000-8000-000000000004",
+			text: "UB-NO-STATE: a row that arrived without a state at all.",
+			fact_type: "world",
+		},
+		{
+			id: "00000000-0000-4000-8000-000000000005",
+			text: "UB-DERIVED: the consolidated retelling of the stated fact.",
+			fact_type: "observation",
+			state: "valid",
+		},
+	]);
+	const h = newHarness({ cwd: makeCwd("unidentified", {}) });
+	await h.start();
+	const t = await h.turn(HOST);
+	const block = blockOf(t, HOST);
+	h.done();
+	check(
+		"Composition: only the stated, valid fact reaches the prompt — unknown, untyped and unstated rows do not",
+		{
+			statedFact: count(block, "UB-STATED"),
+			unknownType: count(block, "UB-UNKNOWN-TYPE"),
+			missingType: count(block, "UB-NO-TYPE"),
+			missingState: count(block, "UB-NO-STATE"),
+			derived: count(block, "UB-DERIVED"),
+			factsAttribute: /facts="(\d+)"/.exec(block)?.[1],
+		},
+		{
+			statedFact: 1,
+			unknownType: 0,
+			missingType: 0,
+			missingState: 0,
+			derived: 0,
+			factsAttribute: "1",
+		},
+	);
+}
+
 // --- Scenario: No marker anywhere in the instructions
 {
 	arm();
@@ -351,6 +462,51 @@ const control = { injects: false, reads: 0 };
 		"Bank becomes available mid-epoch: the decision is retaken at the next boundary, not before",
 		blockOf(after, HOST).length > 0,
 		true,
+	);
+	h.done();
+}
+
+// --- Scenario: The marker arrives mid-epoch
+// The block's bytes are frozen at the boundary, but the decision to use them is
+// part of the same contract. The instruction files carry the marker, so the
+// epoch loads a block; the assembled prompt of this epoch's first turn does not,
+// so this epoch injects nothing — and it keeps not injecting even once a later
+// prompt does carry the marker. Otherwise the cached prefix gains a block
+// between two turns of one epoch, which is the cost this contour exists to
+// avoid.
+{
+	arm();
+	const bare = hostPrompt(agentsMd(0));
+	const h = newHarness({ cwd: makeCwd("late-marker", {}) });
+	await h.start();
+	const opening = await h.turn(bare);
+	const readsAtOpening = userReads().length;
+	const during: Array<{ returned: boolean; final: string }> = [];
+	for (let i = 0; i < 5; i += 1) during.push(await h.turn(HOST));
+	check(
+		"The marker arrives mid-epoch: the epoch's decision stands and no injection starts",
+		{
+			// The block really was loaded, so "nothing injected" is the decision and
+			// not an empty bank: the same instance injects it after the boundary.
+			blockWasLoaded: readsAtOpening,
+			firstTurnInjected: opening.returned,
+			laterTurnsInjected: during.some((t) => t.returned),
+			markerLeftIntact: during.every((t) => t.final === HOST),
+		},
+		{
+			blockWasLoaded: 1,
+			firstTurnInjected: false,
+			laterTurnsInjected: false,
+			markerLeftIntact: true,
+		},
+	);
+	// The control: the next boundary retakes the decision, and now it injects.
+	await h.compact();
+	const after = await h.turn(HOST);
+	check(
+		"The marker arrives mid-epoch: the next boundary retakes the decision and injects",
+		{ injected: after.returned, block: blockOf(after, HOST).length > 0 },
+		{ injected: true, block: true },
 	);
 	h.done();
 }

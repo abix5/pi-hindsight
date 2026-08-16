@@ -37,14 +37,17 @@ export interface UserBlock {
 }
 
 /**
- * Rows that are derived rather than stated. The server stores one retained note
- * twice: the fact itself and an `observation` consolidated from it, with a
- * shortened text — so keeping both would put the same knowledge in the prompt
- * twice in two wordings. The derived copy is the one to drop: it is regenerated
- * from its sources (the server even refuses to curate it directly), so the
- * stated fact is the authoritative text.
+ * The one row shape the block will vouch for.
+ *
+ * The block becomes standing instruction text, which a reader cannot discount
+ * the way they discount a recall list. So a row is carried only when it says,
+ * in as many words, that it is a stated fact that still holds: an unfamiliar
+ * `fact_type`, or a missing `fact_type` or `state`, is a row this code cannot
+ * account for, and an unaccountable row must not become an instruction about
+ * the person. Absence is the safe answer here, unlike in recall.
  */
-const DERIVED_FACT_TYPE = "observation";
+const STATED_FACT_TYPE = "world";
+const VALID_STATE = "valid";
 
 /** Flatten to one physical line: a list item that wraps stops being one item. */
 function flatten(s: string): string {
@@ -81,8 +84,8 @@ function stated(text: string): string {
 export function buildUserBlock(rows: MemoryRow[]): UserBlock | undefined {
 	const seen = new Set<string>();
 	const facts = rows
-		.filter((r) => (r.state ?? "valid") === "valid")
-		.filter((r) => r.fact_type !== DERIVED_FACT_TYPE)
+		.filter((r) => r.state === VALID_STATE)
+		.filter((r) => r.fact_type === STATED_FACT_TYPE)
 		// Sorted by id, not by any date: the server's order is not guaranteed
 		// stable, and an id neither ticks nor changes format, so the same set of
 		// rows always assembles into the same bytes.
@@ -127,18 +130,24 @@ export function buildUserBlock(rows: MemoryRow[]): UserBlock | undefined {
 }
 
 /**
- * Put the block where the marker is, or report that there is nothing to do.
+ * Put the block where a marker LINE is, or report that there is nothing to do.
  *
- * Returns undefined when the prompt carries no marker, so the caller can return
- * no systemPrompt at all and the host's own string stays byte-identical.
+ * Only a line that IS the marker is a substitution point. The marker is
+ * documented, so instructions legitimately talk about it — the README shows it,
+ * and an AGENTS.md may explain it — and splicing a multi-line block into the
+ * middle of somebody's sentence would rewrite an instruction that was never
+ * addressed to us.
  *
- * split/join rather than String.replace: a fact may contain `$&` or `$1`, which
- * replace() would expand as a substitution pattern and quietly corrupt the block.
+ * Line rebuild rather than String.replace: a fact may contain `$&` or `$1`,
+ * which replace() expands as a substitution pattern and would quietly corrupt
+ * the block.
  */
 export function applyUserBlock(
 	systemPrompt: string,
 	block: string,
 ): string | undefined {
-	if (!systemPrompt.includes(USER_BLOCK_MARKER)) return undefined;
-	return systemPrompt.split(USER_BLOCK_MARKER).join(block);
+	const lines = systemPrompt.split("\n");
+	const isMarkerLine = (line: string) => line.trim() === USER_BLOCK_MARKER;
+	if (!lines.some(isMarkerLine)) return undefined;
+	return lines.map((line) => (isMarkerLine(line) ? block : line)).join("\n");
 }

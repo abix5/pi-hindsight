@@ -72,8 +72,11 @@ export const cols = (s: string): number =>
 export interface BankItem {
 	id: string;
 	text: string;
-	fact_type: string;
-	state: string;
+	// Optional so a test can express a row the server never sends: one whose type
+	// or state is missing. What the block does with a row it cannot identify is a
+	// requirement, and an interface that forbade writing one would hide it.
+	fact_type?: string;
+	state?: string;
 }
 
 /**
@@ -285,6 +288,15 @@ export interface Harness {
 	tools: string[];
 	start(reason?: string): Promise<void>;
 	turn(systemPrompt: string): Promise<Turn>;
+	/**
+	 * Run one of the extension's own registered tools.
+	 *
+	 * The only way to exercise a user-bank WRITE the way the model would: the
+	 * write path, its transport call and the callback it fires on success all
+	 * belong to the extension, and a test that set the resulting state by hand
+	 * would be asserting against itself.
+	 */
+	callTool(name: string, params: unknown): Promise<string>;
 	/** A turn that ended: no boundary. */
 	ordinary(): Promise<void>;
 	/** A compaction that was announced and then cancelled: no boundary. */
@@ -301,6 +313,15 @@ export interface Harness {
  * A fresh instance per harness on purpose: an epoch lives exactly as long as the
  * instance, so reusing one would carry a frozen block into the next scenario.
  */
+type ToolDef = {
+	name: string;
+	execute: (
+		id: string,
+		params: unknown,
+		signal?: AbortSignal,
+	) => Promise<{ content: Array<{ text: string }>; isError?: boolean }>;
+};
+
 export function newHarness(opts: {
 	cwd: string;
 	sessionName?: string;
@@ -308,6 +329,7 @@ export function newHarness(opts: {
 }): Harness {
 	const handlers = new Map<string, Handler[]>();
 	const tools: string[] = [];
+	const toolDefs = new Map<string, ToolDef>();
 	let widget: string[] | undefined;
 
 	const api = {
@@ -315,8 +337,9 @@ export function newHarness(opts: {
 		getFlag() {
 			return undefined;
 		},
-		registerTool(def: { name: string }) {
+		registerTool(def: ToolDef) {
 			tools.push(def.name);
+			toolDefs.set(def.name, def);
 		},
 		registerCommand() {},
 		registerShortcut() {},
@@ -406,6 +429,20 @@ export function newHarness(opts: {
 				}
 			}
 			return { returned: modified, final: current, messages };
+		},
+		async callTool(name: string, params: unknown): Promise<string> {
+			const def = toolDefs.get(name);
+			if (!def) throw new Error(`no such tool registered: ${name}`);
+			// The tool reads the process cwd for its own bookkeeping, exactly as it
+			// does under the runner, so the fixture project has to be current.
+			const prev = process.cwd();
+			process.chdir(opts.cwd);
+			try {
+				const res = await def.execute("call-1", params);
+				return res.content.map((c) => c.text).join("\n");
+			} finally {
+				process.chdir(prev);
+			}
 		},
 		async ordinary() {
 			await emit("turn_end", { type: "turn_end" });
