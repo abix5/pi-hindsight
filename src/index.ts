@@ -295,6 +295,17 @@ export default function (pi: ExtensionAPI) {
 	 * turn, for free.
 	 */
 	let userBlockWarned = false;
+	/**
+	 * Armed at the end of startup, spent on the first turn.
+	 *
+	 * The upgrade notice cannot be announced during startup: pi's showStatus
+	 * reuses its own chat node while that node is still last, so extensions
+	 * announcing themselves in sequence overwrite each other and only the final
+	 * one survives. On the first turn the startup burst is over and the turn's own
+	 * output lands after the notice, which breaks the reuse link and pins it for
+	 * good.
+	 */
+	let changelogPending = false;
 
 	type NotifyUi = {
 		notify?: (message: string, type?: "info" | "warning" | "error") => void;
@@ -606,14 +617,17 @@ export default function (pi: ExtensionAPI) {
 			autoMemorize: cfg?.autoMemorize,
 		});
 		status.attach(ctx.ui);
-		// The upgrade notice is emitted in the `finally` below, LAST on every exit
-		// path. pi routes an "info" notify to showStatus, which REUSES the previous
-		// status node when it is still the last thing in the chat -- so whatever
-		// notifies next overwrites it in place. Announced first, the release notes
-		// were replaced by `bank "..." ready` between one line and the next, and the
-		// state file recorded them as shown. Going last also covers the early
-		// returns: a dormant project and a failed init are still upgrades the person
-		// deserves to hear about.
+		// The upgrade notice does NOT fire here. pi routes an "info" notify to
+		// showStatus, which REUSES its own node while that node is still the last
+		// thing in the chat -- so during startup, where several extensions announce
+		// themselves one after another, the last one wins and the rest are erased in
+		// place. Ours was: `bank "..." ready` took it first, and once that was fixed
+		// `Ponytail loaded: full` took it a couple of seconds later. pi's own release
+		// banner survives because it appends its nodes directly and never touches
+		// that bookkeeping; an extension has no such surface. So the notice waits for
+		// the first turn (see the recall handler below), by which point the startup
+		// chatter is over and the turn's own output appends after it, breaking the
+		// reuse link and making it permanent.
 		try {
 			if (!cfg || !client) return;
 		// First epoch boundary. Awaited: the runner awaits session_start handlers, so
@@ -670,13 +684,8 @@ export default function (pi: ExtensionAPI) {
 				);
 			}
 		} finally {
-			// Addressed to the PERSON, never the model, and only in a HOST session with
-			// a UI: workflow agents returned above, and tools-only / ephemeral /
-			// dev-stand-down modes never register this hook. It is about the PLUGIN
-			// rather than this project's bank, so a dormant project hears it too.
-			// Synchronous local-file work that never throws, so a broken changelog
-			// cannot break session start.
-			showChangelogNotice(ctx.ui?.notify?.bind(ctx.ui));
+			// Startup is done; arm the upgrade notice for the first turn.
+			changelogPending = true;
 		}
 	});
 
@@ -751,6 +760,13 @@ export default function (pi: ExtensionAPI) {
 			hasClient: !!client,
 		});
 		status.attach(ctx.ui);
+		if (changelogPending) {
+			changelogPending = false;
+			// To the PERSON, never the model: this is ui.notify, not a message, so
+			// nothing here reaches the context. It never throws, so a broken changelog
+			// cannot cost a turn.
+			showChangelogNotice(ctx.ui?.notify?.bind(ctx.ui));
+		}
 		if (!runtime.autoRecall || !cfg || !client || !cfg.active) {
 			status.recallOff();
 			return;
