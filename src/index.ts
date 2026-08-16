@@ -606,15 +606,16 @@ export default function (pi: ExtensionAPI) {
 			autoMemorize: cfg?.autoMemorize,
 		});
 		status.attach(ctx.ui);
-		// The upgrade notice, addressed to the PERSON via ui.notify, never the model.
-		// It fires here — a HOST session with a UI — and nowhere else: workflow agent
-		// sessions returned above, and tools-only / ephemeral / dev-stand-down modes
-		// never register this hook. It runs BEFORE the activation check on purpose:
-		// the notice is about the PLUGIN, not this project's bank, and a person in a
-		// dormant project still upgraded. Synchronous local-file work; it never
-		// throws, so a broken changelog cannot break session start.
-		showChangelogNotice(ctx.ui?.notify?.bind(ctx.ui));
-		if (!cfg || !client) return;
+		// The upgrade notice is emitted in the `finally` below, LAST on every exit
+		// path. pi routes an "info" notify to showStatus, which REUSES the previous
+		// status node when it is still the last thing in the chat -- so whatever
+		// notifies next overwrites it in place. Announced first, the release notes
+		// were replaced by `bank "..." ready` between one line and the next, and the
+		// state file recorded them as shown. Going last also covers the early
+		// returns: a dormant project and a failed init are still upgrades the person
+		// deserves to hear about.
+		try {
+			if (!cfg || !client) return;
 		// First epoch boundary. Awaited: the runner awaits session_start handlers, so
 		// the block is frozen before the session's first turn can ask for it. It runs
 		// before the activation check on purpose — what the user bank knows about the
@@ -661,12 +662,21 @@ export default function (pi: ExtensionAPI) {
 				/* counts are best-effort */
 			}
 			ctx.ui?.notify?.(`\uD83E\uDDE0 bank "${cfg.bankId}" ready`, "info");
-		} catch (err) {
-			status.bankError((err as Error).message);
-			ctx.ui?.notify?.(
-				`\uD83E\uDDE0 bank ensure failed: ${(err as Error).message}`,
-				"warning",
-			);
+			} catch (err) {
+				status.bankError((err as Error).message);
+				ctx.ui?.notify?.(
+					`\uD83E\uDDE0 bank ensure failed: ${(err as Error).message}`,
+					"warning",
+				);
+			}
+		} finally {
+			// Addressed to the PERSON, never the model, and only in a HOST session with
+			// a UI: workflow agents returned above, and tools-only / ephemeral /
+			// dev-stand-down modes never register this hook. It is about the PLUGIN
+			// rather than this project's bank, so a dormant project hears it too.
+			// Synchronous local-file work that never throws, so a broken changelog
+			// cannot break session start.
+			showChangelogNotice(ctx.ui?.notify?.bind(ctx.ui));
 		}
 	});
 

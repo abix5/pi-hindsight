@@ -23,7 +23,7 @@ import {
 import { showChangelogNotice } from "../src/changelog.ts";
 
 const FIRST_LINE = "pi-hindsight updated to 0.5.1";
-const repoRoot = path.join(import.meta.dir, "..");
+const repoRoot = path.join(import.meta.dirname, "..");
 const pkg = JSON.parse(
 	fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
 ) as { version: string; files: string[] };
@@ -81,6 +81,17 @@ check(
 	"the bookmark advanced to 0.5.1",
 	JSON.parse(fs.readFileSync(statePath, "utf8")).lastNotifiedVersion,
 	"0.5.1",
+);
+// Position, not just presence. pi routes an "info" notify to showStatus, which
+// REUSES the previous status node while it is still the last thing in the chat,
+// so a notice followed by another one is overwritten in place and the person
+// sees only the last. That is exactly what happened on the first live run: the
+// release notes were announced, replaced by `bank "..." ready`, and recorded as
+// shown. Being last on every exit path is the behaviour, so it is checked.
+check(
+	"nothing notifies after it, or the chat would overwrite it in place",
+	h1.notices().at(-1)?.message.startsWith("pi-hindsight updated to"),
+	true,
 );
 
 console.log("\n== nothing of it reaches the model ==");
