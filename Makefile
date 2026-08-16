@@ -59,6 +59,7 @@ check: ## Typecheck + run the self-tests
 	bun scripts/user-block-widget.test.ts
 	bun scripts/delta-window.test.ts
 	bun scripts/restore-killed-fact.test.ts
+	bun scripts/changelog.test.ts
 	npm test
 
 publish: check ## Typecheck, then publish to npm (needs auth)
