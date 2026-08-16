@@ -139,7 +139,6 @@ export function showChangelogNotice(
 		).version;
 		if (typeof version !== "string" || !version.trim()) return;
 		const previous = lastNotifiedVersion(statePath);
-		if (false) return;
 		const entries = releaseEntries(
 			parseChangelog(
 				fs.readFileSync(path.join(packageDir, "CHANGELOG.md"), "utf8"),
