@@ -144,10 +144,14 @@ export function findMarkers(text: string): MarkerHit[] {
 				body.push(line);
 			}
 		}
-		hits.push(
-			closed ? { from: i, to, spec: parseMarker(head[1] ?? "", body) } : { from: i, to },
-		);
-		i = to;
+		// An UNCLOSED marker is not a marker. Emitting a hit for it would hand the
+		// caller a range running to the end of the scan, and blanking that range
+		// would delete the rest of the instructions along with it. Keep scanning
+		// from the next line, so a well-formed marker further down is still found.
+		if (closed) {
+			hits.push({ from: i, to, spec: parseMarker(head[1] ?? "", body) });
+			i = to;
+		}
 	}
 	return hits;
 }
@@ -317,7 +321,11 @@ export function buildUserBlock(
 
 /** Does this text carry a marker we understood? */
 export function hasMarker(text: string): boolean {
-	return findMarkers(text).some((h) => h.spec);
+	// Any marker, parsed or refused. A refusal is still a note addressed to this
+	// extension, so the epoch owns it either way and takes it out of the prompt.
+	// Counting only parsed ones would leave a malformed marker in front of the
+	// model, which cannot tell it was rejected and simply reads the directive.
+	return findMarkers(text).length > 0;
 }
 
 /**
@@ -341,14 +349,16 @@ export function applyUserBlock(
 	systemPrompt: string,
 	block: string | undefined,
 ): string | undefined {
-	const hits = findMarkers(systemPrompt).filter((h) => h.spec);
+	const hits = findMarkers(systemPrompt);
 	if (hits.length === 0) return undefined;
 	const lines = systemPrompt.split("\n");
 	const out: string[] = [];
 	let at = 0;
 	for (const hit of hits) {
 		while (at < hit.from) out.push(lines[at++] ?? "");
-		if (block) out.push(block);
+		// Only a marker that PARSED can receive the block; a refused one is dropped
+		// with nothing in its place. Both leave the surrounding file untouched.
+		if (block && hit.spec) out.push(block);
 		at = hit.to + 1;
 	}
 	while (at < lines.length) out.push(lines[at++] ?? "");

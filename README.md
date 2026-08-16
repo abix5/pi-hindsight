@@ -44,9 +44,11 @@ Put a marker in an `AGENTS.md` the agent already loads (the global
 a `<user_profile>` block built from the user bank.
 
 The multi-line and single-line forms produce identical bytes. Exactly one
-selector is allowed; a marker with anything unparsed in it is refused whole and
-left in the file exactly as written, so the mistake stays where its author can
-see it.
+selector is allowed; a marker with anything unparsed in it is refused whole —
+nothing is fetched on its behalf, and the marker is taken out of the prompt
+rather than passed to the model, which could not tell that it had been rejected.
+Your file is never edited, so the mistake stays where its author can see it, and
+you are told about it once per session.
 
 ```markdown
 <!-- hindsight:user -->                        bare: the bank's stated facts

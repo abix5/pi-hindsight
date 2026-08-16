@@ -10,7 +10,6 @@
  */
 
 import {
-	agentsMd,
 	bank,
 	bankOf,
 	check,
@@ -185,13 +184,15 @@ const unknown = await run(
 	["<!-- hindsight:user", "  colour: blue", "-->"].join("\n"),
 );
 check(
-	"An unknown field refuses the whole marker: nothing is injected and nothing is asked",
+	"An unknown field refuses the whole marker: nothing is asked, and the marker is taken out",
 	{
-		injected: unknown.returned,
-		markerLeftIntact: unknown.final.includes("colour: blue"),
+		// `returned` only says the prompt was rewritten; a refused marker IS
+		// rewritten, to nothing. What must not appear is a block.
+		carriesABlock: unknown.final.includes("UB-ONE"),
+		markerReachesTheModel: unknown.final.includes("colour: blue"),
 		requests: userCalls().length,
 	},
-	{ injected: false, markerLeftIntact: true, requests: 0 },
+	{ carriesABlock: false, markerReachesTheModel: false, requests: 0 },
 );
 
 // --- Scenario: two selectors at once
@@ -207,8 +208,12 @@ const both = await run(
 );
 check(
 	"Two selectors are two answers for one hole, so the marker is refused rather than guessed",
-	{ injected: both.returned, requests: userCalls().length },
-	{ injected: false, requests: 0 },
+	{
+		carriesABlock: both.final.includes("UB-ONE"),
+		markerReachesTheModel: both.final.includes("hindsight:user"),
+		requests: userCalls().length,
+	},
+	{ carriesABlock: false, markerReachesTheModel: false, requests: 0 },
 );
 
 // --- Scenario: a marker that is never closed
@@ -334,6 +339,44 @@ check(
 			mentionsTheBlock: notices.some((n) => /block|marker/i.test(n.message)),
 		},
 		{ warnings: 0, mentionsTheBlock: false },
+	);
+}
+
+// --- Scenario: a marker the parser refused is still OURS
+// The refusal is the point of the strict parser, but a refused marker is still a
+// note addressed to this extension. Leaving it in the prompt hands the model an
+// instruction written for someone else, and the model cannot tell that it was
+// rejected — it just reads a directive about a `user-profile` and improvises.
+// The person hears about the mistake through the warning; the model hears
+// nothing.
+{
+	arm();
+	const md = instructions("<!-- hindsight:user nonsense: x -->");
+	const host = hostPrompt(md);
+	const h = newHarness({ cwd: makeCwd("refused", {}, md) });
+	await h.start();
+	const t = await h.turn(host);
+	const warned = h.notices().filter((n) => n.type === "warning").length;
+	h.done();
+	check(
+		"A marker the parser refused is taken out of the prompt, not handed to the model",
+		{
+			markerReachesTheModel: (t.final ?? host).includes("hindsight:user"),
+			// Two selectors is exactly the ambiguity the parser refuses, so nothing
+			// may be fetched on its behalf either.
+			askedTheBank: userCalls().length,
+			warnedThePerson: warned,
+			// Everything else in the file is untouched.
+			restIntact: (t.final ?? host).includes(
+				"Commit messages are written in English.",
+			),
+		},
+		{
+			markerReachesTheModel: false,
+			askedTheBank: 0,
+			warnedThePerson: 1,
+			restIntact: true,
+		},
 	);
 }
 
