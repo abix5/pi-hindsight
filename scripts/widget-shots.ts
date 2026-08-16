@@ -128,58 +128,82 @@ async function memStatus(): Promise<string[]> {
 	return panel.render(72);
 }
 
+/**
+ * The widget legend: ONE ordered source for both the picture and the README
+ * list. `widget-legend` prints every row prefixed with its dim number, and
+ * `--legend-md` prints the matching numbered markdown list — so the numbers in
+ * the picture and the list under it can never drift apart.
+ */
+const legend: Array<{ md: string; shoot: () => void }> = [
+	{
+		md: "Idle and connected: green dot, bright `↙↗`, 16 documents / 153 facts in the bank.",
+		shoot: () => void fresh(),
+	},
+	{
+		md: "Recall queried the bank about your message, found 12 facts and injected the 3 that survived the relevance judge.",
+		shoot: () => recall(fresh(), 12, 3),
+	},
+	{
+		md: "Recall ran and found nothing relevant — nothing was injected, no context was spent.",
+		shoot: () => recall(fresh(), 0, 0),
+	},
+	{
+		md: "`⟳`: a compaction is being distilled into memory right now, in the background.",
+		shoot: () => {
+			const s = fresh();
+			s.memoCollecting(3, "compaction");
+			s.memoWriting();
+		},
+	},
+	{
+		md: "The write landed: 2 documents, 9 lines of durable knowledge, upserted into the bank.",
+		shoot: () => fresh().memoDone(2, 9),
+	},
+	{
+		md: "A write failed and the red `↗!` tail says why; the green dot says the bank itself is fine.",
+		shoot: () => fresh().memoError("retain model unavailable"),
+	},
+	{
+		md: "This write also retired 3 obsolete facts (`153f↓3`); the badge accumulates all session, so a kill cannot scroll away unread.",
+		shoot: () => {
+			const s = fresh();
+			s.memoRetired(3);
+			s.memoDone(1, 4);
+		},
+	},
+	{
+		md: "`≡4` — 4 facts from the user bank are frozen into this epoch's prompt.",
+		shoot: () => fresh().userBlock({ injected: true, facts: 4, stale: false }),
+	},
+	{
+		md: "`≡4→` — the bank has moved on; the prompt follows at the next epoch.",
+		shoot: () => fresh().userBlock({ injected: true, facts: 4, stale: true }),
+	},
+	{
+		md: "`≡!` — a user block was asked for and could not be delivered.",
+		shoot: () =>
+			fresh().userBlock({ injected: false, blank: true, facts: 0, stale: false }),
+	},
+	{
+		md: "`≡–` — nobody asked for a user block.",
+		shoot: () => fresh().userBlock({ injected: false, facts: 0, stale: false }),
+	},
+	{
+		md: "`/mem-auto off`: everything dims and the cue reads `auto off` — a choice, not a fault.",
+		shoot: () => {
+			const s = fresh();
+			s.recallOff();
+			s.memoOff();
+		},
+	},
+];
+
 const shots: Record<string, () => string[] | Promise<string[]>> = {
-	"widget-idle": () => {
-		fresh();
-		return [line];
-	},
-	"widget-recall-injected": () => {
-		recall(fresh(), 12, 3);
-		return [line];
-	},
-	"widget-recall-nothing": () => {
-		recall(fresh(), 0, 0);
-		return [line];
-	},
-	"widget-writing": () => {
-		const s = fresh();
-		s.memoCollecting(3, "compaction");
-		s.memoWriting();
-		return [line];
-	},
-	"widget-stored": () => {
-		fresh().memoDone(2, 9);
-		return [line];
-	},
-	"widget-write-error": () => {
-		fresh().memoError("retain model unavailable");
-		return [line];
-	},
-	"widget-retired": () => {
-		const s = fresh();
-		s.memoRetired(3);
-		s.memoDone(1, 4);
-		return [line];
-	},
-	"widget-user-block": () => {
-		const out: string[] = [];
-		for (const st of [
-			{ injected: true, facts: 4, stale: false },
-			{ injected: true, facts: 4, stale: true },
-			{ injected: false, blank: true, facts: 0, stale: false },
-			{ injected: false, facts: 0, stale: false },
-		]) {
-			fresh().userBlock(st);
-			out.push(line);
-		}
-		return out;
-	},
-	"widget-paused": () => {
-		const s = fresh();
-		s.recallOff();
-		s.memoOff();
-		return [line];
-	},
+	"widget-legend": () =>
+		legend.map(({ shoot }, i) => {
+			shoot();
+			return `${theme.fg("dim", String(i + 1).padStart(2))}  ${line}`;
+		}),
 	session: () => {
 		const out: string[] = [];
 		const cap = (t: string) => out.push(`\x1b[90m${t}\x1b[39m`);
@@ -240,6 +264,10 @@ const shots: Record<string, () => string[] | Promise<string[]>> = {
 const name = process.argv[2] ?? "";
 if (name === "--list") {
 	console.log(Object.keys(shots).join("\n"));
+	process.exit(0);
+}
+if (name === "--legend-md") {
+	console.log(legend.map((r, i) => `${i + 1}. ${r.md}`).join("\n"));
 	process.exit(0);
 }
 const shot = shots[name];
