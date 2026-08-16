@@ -118,6 +118,8 @@ export class HindsightStatus {
 	private user = {
 		known: false,
 		injected: false,
+		/** Instructions asked for a block and this epoch had none to give. */
+		blank: false,
 		facts: 0,
 		stale: false,
 	};
@@ -234,21 +236,33 @@ export class HindsightStatus {
 	 * system prompt, how many facts it carries, and whether the bank has since
 	 * moved past it.
 	 *
-	 * All three readings name WHEN the line can change, because the block is not
-	 * live — it is frozen for the epoch, so what the user sees is the answer from
-	 * the last boundary, and a fact written now lands at the next one.
+	 * Four readings, because "nothing in the prompt" has two very different
+	 * causes. `blank` means the instructions DID ask for a block and this epoch
+	 * had none to give — a broken marker, a missing model, a bank that did not
+	 * answer — and the marker was blanked out. Absence of both means nobody asked,
+	 * which is not a problem and must not look like one. The person is warned once
+	 * per session; this line is the live probe that keeps answering every turn.
+	 *
+	 * Every injected reading names WHEN the line can change, because the block is
+	 * not live — it is frozen for the epoch, so what the user sees is the answer
+	 * from the last boundary, and a fact written now lands at the next one.
 	 */
 	userBlock(state: {
 		injected: boolean;
+		blank?: boolean;
 		facts: number;
 		stale: boolean;
 	}): void {
-		this.user = { known: true, ...state };
+		this.user = { known: true, blank: false, ...state };
 		this.lastAction = { text: this.userLine(), tone: "dim" };
 		this.render();
 	}
 
 	private userLine(): string {
+		// Asked for and not delivered: say so plainly. "no user block" here would
+		// read as "you never set this up" and send the reader looking for a setting
+		// they already wrote.
+		if (this.user.blank) return "≡ user block unavailable";
 		if (!this.user.injected) return "≡ no user block";
 		// Both readings name the epoch, because neither is live. Saying only
 		// "N facts in prompt" reads as a mirror of the bank, and a person who then
@@ -268,6 +282,10 @@ export class HindsightStatus {
 	 */
 	private userFrag(): string {
 		if (!this.user.known) return "";
+		// `≡!` and `≡–` are one glyph apart on purpose: they are read at a glance,
+		// and the difference between "asked and got nothing" and "never asked" is
+		// exactly what the reader needs at that glance.
+		if (this.user.blank) return "≡!";
 		if (!this.user.injected) return "≡–";
 		return `≡${this.user.facts}${this.user.stale ? "→" : ""}`;
 	}

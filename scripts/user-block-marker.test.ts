@@ -234,17 +234,19 @@ const pending = await run(
 	"<!-- hindsight:user model: user-profile -->",
 );
 check(
-	"A model still generating is not an answer: nothing is injected and the marker stays",
+	"A model still generating is not an answer: nothing is injected and the marker is blanked",
 	{
-		injected: pending.returned,
+		injected: pending.block.includes("Правило"),
 		askedForIt: asked("/mental-models/user-profile"),
-		markerLeftIntact: pending.final.includes("<!-- hindsight:user"),
+		// The marker goes even with nothing to put in its place: it is a note to
+		// this extension, and the model must not be handed it to interpret.
+		markerBlanked: pending.final.includes("<!-- hindsight:user"),
 		placeholderLeaked: pending.final.includes("Generating content"),
 	},
 	{
 		injected: false,
 		askedForIt: 1,
-		markerLeftIntact: true,
+		markerBlanked: false,
 		placeholderLeaked: false,
 	},
 );
@@ -262,5 +264,77 @@ check(
 	{ injected: control.returned, carries: control.block.includes("Правило") },
 	{ injected: true, carries: true },
 );
+
+// ============================== Requirement: the person is told, the model is not
+
+// --- Scenario: a marker that cannot be answered warns once, out of band
+// The warning is not a toast: pi appends `Warning: …` to the chat container, so
+// it stays in the scrollback. Repeating it at every boundary would litter the
+// transcript, and putting it in the context would spend tokens asking the model
+// to fix a file it did not write.
+{
+	arm();
+	bank.user.mode = "error";
+	const md = instructions("<!-- hindsight:user model: user-profile -->");
+	const host = hostPrompt(md);
+	const h = newHarness({ cwd: makeCwd("warned", {}, md) });
+	await h.start();
+	const first = await h.turn(host);
+	const afterStart = h.notices().filter((n) => n.type === "warning");
+	// A second boundary in the same session must not warn again.
+	await h.compact();
+	await h.turn(host);
+	const afterCompact = h.notices().filter((n) => n.type === "warning");
+	const messages = h.notices().map((n) => n.message);
+	h.done();
+	check(
+		"A bank that does not answer warns the person once per session, never the model",
+		{
+			warnedOnce: afterStart.length,
+			stillOnceAfterASecondBoundary: afterCompact.length,
+			saysWhichBank: messages.some((m) => m.includes("user-bank")),
+			saysNothingWasInjected: messages.some((m) =>
+				/nothing injected/i.test(m),
+			),
+			// pi stamps the word itself, so the text must not stamp it again.
+			noDoubleStamp: messages.some((m) => /warn/i.test(m)),
+			// One line, no escapes: it lands in a single Text node.
+			oneLine: messages.every((m) => !m.includes("\n") && !m.includes("\u001b")),
+			nothingReachedTheModel: first.messages.some((m) =>
+				/warn/i.test(String(m.customType ?? "")),
+			),
+		},
+		{
+			warnedOnce: 1,
+			stillOnceAfterASecondBoundary: 1,
+			saysWhichBank: true,
+			saysNothingWasInjected: true,
+			noDoubleStamp: false,
+			oneLine: true,
+			nothingReachedTheModel: false,
+		},
+	);
+}
+
+// --- Scenario: a marker nobody wrote stays silent
+{
+	arm();
+	const md = instructions("nothing to see here");
+	const h = newHarness({ cwd: makeCwd("silent", {}, md) });
+	await h.start();
+	await h.turn(hostPrompt(md));
+	const notices = h.notices();
+	h.done();
+	check(
+		"A project that never asked for a block is never warned about it",
+		{
+			// Scoped to warnings on purpose: the extension still says its ordinary
+			// `bank ready` at startup, and silencing that is not what this asks for.
+			warnings: notices.filter((n) => n.type === "warning").length,
+			mentionsTheBlock: notices.some((n) => /block|marker/i.test(n.message)),
+		},
+		{ warnings: 0, mentionsTheBlock: false },
+	);
+}
 
 report();

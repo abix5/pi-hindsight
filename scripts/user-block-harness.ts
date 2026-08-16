@@ -320,6 +320,13 @@ export interface Harness {
 	/** A compaction that actually happened: a boundary. */
 	compact(): Promise<void>;
 	widget(): string[] | undefined;
+	/**
+	 * Everything the extension said to the PERSON through `ctx.ui.notify`.
+	 *
+	 * Recorded per harness, because "warn once per session" is a claim about a
+	 * count, and a count cannot be checked against a notify that goes nowhere.
+	 */
+	notices(): Array<{ message: string; type?: string }>;
 	done(): void;
 }
 
@@ -347,6 +354,7 @@ export function newHarness(opts: {
 	const tools: string[] = [];
 	const toolDefs = new Map<string, ToolDef>();
 	let widget: string[] | undefined;
+	const notices: Array<{ message: string; type?: string }> = [];
 
 	const api = {
 		registerFlag() {},
@@ -375,7 +383,9 @@ export function newHarness(opts: {
 				widget = content;
 			},
 			setStatus() {},
-			notify() {},
+			notify(message: string, type?: string) {
+				notices.push({ message, type });
+			},
 			theme: THEME,
 		},
 		sessionManager: {
@@ -481,6 +491,9 @@ export function newHarness(opts: {
 		},
 		widget() {
 			return widget;
+		},
+		notices() {
+			return notices;
 		},
 		done() {
 			const current = g.__piHindsightDispose;

@@ -31,6 +31,7 @@ import {
 	buildModelBlock,
 	buildUserBlock,
 	findMarkers,
+	hasMarker,
 	type MarkerSpec,
 } from "./user-block.ts";
 
@@ -282,6 +283,40 @@ export default function (pi: ExtensionAPI) {
 	 */
 	let epochDecided = false;
 	let epochInjects = false;
+
+	/**
+	 * Has this session already been told the user block is not working?
+	 *
+	 * Once per session, not once per epoch. `notify(_, "warning")` is not a toast:
+	 * pi appends it to the chat container as `Warning: …`, so it stays in the
+	 * scrollback, and repeating it at every compaction would litter the very
+	 * transcript the person is reading. The widget is what keeps saying it, every
+	 * turn, for free.
+	 */
+	let userBlockWarned = false;
+
+	type NotifyUi = {
+		notify?: (message: string, type?: "info" | "warning" | "error") => void;
+	};
+
+	/**
+	 * Tell the PERSON, once, and never the model.
+	 *
+	 * A marker that could not be answered is a human mistake or a server that is
+	 * down; either way the model can do nothing about it, and putting it in the
+	 * context would spend tokens asking it to fix a file it did not write. It is
+	 * always a warning and never an error: the session continues, just without the
+	 * block. pi stamps the word `Warning:` itself, so the text carries only the
+	 * substance — one line, no ANSI, no newlines.
+	 */
+	const warnUser = (ui: NotifyUi | undefined, what: string): void => {
+		if (userBlockWarned) return;
+		userBlockWarned = true;
+		ui?.notify?.(
+			`pi-hindsight: ${what} \u2014 nothing injected this session`,
+			"warning",
+		);
+	};
 	// Rows the bank may return for the block. Generous next to the size ceiling that
 	// actually bounds it, so the ceiling — not the page size — decides what is kept.
 	const USER_BLOCK_LIMIT = 200;
@@ -299,6 +334,18 @@ export default function (pi: ExtensionAPI) {
 	let markerSeen: MarkerSpec | undefined;
 
 	/**
+	 * What the instructions ask for, including the case where they ask badly.
+	 *
+	 * `broken` is not the same answer as `none`: one is a person who wrote a marker
+	 * and deserves to be told it was not understood, the other is a project that
+	 * never asked for anything and must be left in silence.
+	 */
+	type Ask =
+		| { kind: "none" }
+		| { kind: "broken"; where: string }
+		| { kind: "ask"; spec: MarkerSpec };
+
+	/**
 	 * What, if anything, this session's instructions ask for.
 	 *
 	 * A boundary has no prompt yet — it happens before the first turn — so the only
@@ -312,22 +359,27 @@ export default function (pi: ExtensionAPI) {
 	 * be several different blocks, and this contour freezes exactly one per epoch;
 	 * answering the first is predictable, while merging them would not be.
 	 */
-	const markerAsk = (cwd: string): MarkerSpec | undefined => {
-		if (markerSeen) return markerSeen;
+	const markerAsk = (cwd: string): Ask => {
+		if (markerSeen) return { kind: "ask", spec: markerSeen };
+		let broken: { kind: "broken"; where: string } | undefined;
 		for (const file of [
 			path.join(cwd, "AGENTS.md"),
 			path.join(homeDir(), ".pi", "agent", "AGENTS.md"),
 		]) {
 			try {
-				const spec = findMarkers(fs.readFileSync(file, "utf8")).find(
-					(h) => h.spec,
-				)?.spec;
-				if (spec) return spec;
+				const hits = findMarkers(fs.readFileSync(file, "utf8"));
+				const good = hits.find((h) => h.spec);
+				if (good?.spec) return { kind: "ask", spec: good.spec };
+				// Remembered, not returned yet: a later file may still carry a marker
+				// that works, and a working marker beats a broken one anywhere else.
+				const bad = hits.find((h) => !h.spec);
+				if (bad && !broken)
+					broken = { kind: "broken", where: `${file}:${bad.from + 1}` };
 			} catch {
 				/* absent or unreadable: no marker to be had here */
 			}
 		}
-		return undefined;
+		return broken ?? { kind: "none" };
 	};
 
 	/**
@@ -337,7 +389,11 @@ export default function (pi: ExtensionAPI) {
 	 * block simply stays in force; when there is no previous block, the state stays
 	 * "no block" and the prompt is left untouched, marker and all.
 	 */
-	const openUserEpoch = async (cwd: string, reason: string) => {
+	const openUserEpoch = async (
+		cwd: string,
+		reason: string,
+		ui?: { notify?: (message: string, type?: "info" | "warning" | "error") => void },
+	) => {
 		// A new epoch retakes the decision — including after a failed read, where the
 		// previous block stays in force but this session may now carry the marker.
 		epochDecided = false;
@@ -345,27 +401,35 @@ export default function (pi: ExtensionAPI) {
 		const ub = userBankOf(cfg);
 		if (!ub) return; // no user bank declared: no request, no widget, no injection
 		const ask = markerAsk(cwd);
-		if (!ask) {
+		if (ask.kind === "none") {
 			appendDebug(cwd, "userblock.epoch.nomarker", { reason });
 			return;
 		}
+		if (ask.kind === "broken") {
+			appendDebug(cwd, "userblock.epoch.badmarker", { reason, at: ask.where });
+			warnUser(ui, `marker at ${ask.where} was not understood`);
+			return;
+		}
+		const { spec } = ask;
 		try {
 			let block: { text: string; facts: number } | undefined;
-			if (ask.model) {
+			if (spec.model) {
 				// One GET of an answer the server already assembled and keeps fresh on
 				// its own trigger. Nothing reasons here, so the boundary pays a request
 				// and not a generation.
 				block = buildModelBlock(
 					await ub.client.mentalModel(
-						ask.model,
+						spec.model,
 						undefined,
 						USER_BLOCK_CEILING_MS,
 					),
 				);
-			} else if (ask.query) {
+				if (!block)
+					warnUser(ui, `mental model "${spec.model}" has no content yet`);
+			} else if (spec.query) {
 				block = buildUserBlock(
-					await ub.client.recall(ask.query, {}, undefined),
-					ask.limit,
+					await ub.client.recall(spec.query, {}, undefined),
+					spec.limit,
 				);
 			} else {
 				block = buildUserBlock(
@@ -379,18 +443,29 @@ export default function (pi: ExtensionAPI) {
 			userBlock = block?.text;
 			userBlockFacts = block?.facts ?? 0;
 			userBlockStale = false; // the frozen block and the bank agree again
+			const from = spec.model ? "model" : spec.query ? "query" : "facts";
 			appendDebug(cwd, "userblock.epoch", {
 				reason,
-				from: ask.model ? "model" : ask.query ? "query" : "facts",
+				from,
 				facts: userBlockFacts,
 				chars: userBlock?.length ?? 0,
 			});
 		} catch (err) {
+			// Nothing is assigned, so a block from an earlier boundary of THIS session
+			// stays in force — a stale answer beats an empty one, and the widget says
+			// it is stale. A fresh process has no such cache, and then the marker is
+			// simply blanked and the person told once.
 			appendDebug(cwd, "userblock.epoch.error", {
 				reason,
 				error: (err as Error).message,
 				kept: userBlockFacts,
 			});
+			if (userBlock) userBlockStale = true;
+			else
+				warnUser(
+					ui,
+					`bank "${cfg?.userBankId}" did not answer (${(err as Error).message})`,
+				);
 		}
 	};
 
@@ -535,7 +610,7 @@ export default function (pi: ExtensionAPI) {
 		// the block is frozen before the session's first turn can ask for it. It runs
 		// before the activation check on purpose — what the user bank knows about the
 		// person holds in every repository, including one with no project bank.
-		await openUserEpoch(ctx.cwd ?? process.cwd(), "session_start");
+		await openUserEpoch(ctx.cwd ?? process.cwd(), "session_start", ctx.ui);
 		// Inactive project (no declared bank): do NOT ensureBank / sync missions /
 		// count / notify. Just hide the widget and bail — this is not an error.
 		if (!cfg.active) {
@@ -592,7 +667,11 @@ export default function (pi: ExtensionAPI) {
 	// occurs would swap the block in the middle of a live epoch.
 	pi.on("session_compact", async (event, ctx) => {
 		if (standDown) return;
-		await openUserEpoch(ctx.cwd ?? process.cwd(), `compact:${event.reason}`);
+		await openUserEpoch(
+			ctx.cwd ?? process.cwd(),
+			`compact:${event.reason}`,
+			ctx.ui,
+		);
 	});
 
 	// Inject the frozen user block into the system prompt.
@@ -616,18 +695,21 @@ export default function (pi: ExtensionAPI) {
 		if (asked) markerSeen = asked;
 		if (!epochDecided) {
 			epochDecided = true;
-			epochInjects =
-				!!userBlock && applyUserBlock(event.systemPrompt ?? "", "") !== undefined;
+			// The decision is only whether this epoch OWNS the marker, not whether it
+			// has anything to put there. A marker with no answer is still ours: it gets
+			// blanked, so the model never reads a note addressed to this extension.
+			epochInjects = hasMarker(event.systemPrompt ?? "");
 		}
 		const next = epochInjects
-			? applyUserBlock(event.systemPrompt ?? "", userBlock ?? "")
+			? applyUserBlock(event.systemPrompt ?? "", userBlock)
 			: undefined;
 		// The widget reports what actually happened to THIS prompt, not what was read
-		// at the boundary: a bank full of facts and instructions carrying no marker
-		// still means nothing is injected, and saying otherwise would be a lie the
-		// user cannot check.
+		// at the boundary: a marker the epoch answered with nothing is a different
+		// state from a project that never asked, and saying otherwise would be a lie
+		// the user cannot check.
 		status.userBlock({
-			injected: next !== undefined,
+			injected: next !== undefined && !!userBlock,
+			blank: next !== undefined && !userBlock,
 			facts: userBlockFacts,
 			stale: userBlockStale,
 		});

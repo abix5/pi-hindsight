@@ -438,21 +438,28 @@ const control = { injects: false, reads: 0 };
 	const dead = await h.turn(HOST);
 	bank.user.mode = "ok";
 	bank.user.items = bankOf(FOUR);
-	const during: Array<{ returned: boolean; final: string }> = [];
+	const during: Awaited<ReturnType<typeof h.turn>>[] = [];
 	for (let i = 0; i < 6; i += 1) during.push(await h.turn(HOST));
 	check(
 		"Bank becomes available mid-epoch: no injection starts mid-epoch",
 		{
 			controlInjects: control.injects,
-			firstTurnInjected: dead.returned,
-			laterTurnsInjected: during.some((t) => t.returned),
-			allByteIdentical: during.every((t) => t.final === HOST),
+			// `returned` is now true even with nothing to inject: the epoch owns the
+			// marker and blanks it, so the prompt IS rewritten. What must not happen
+			// is a BLOCK appearing, which is what the next two lines measure.
+			firstTurnCarriesABlock: blockOf(dead, HOST).length > 0,
+			laterTurnsCarryABlock: during.some((t) => blockOf(t, HOST).length > 0),
+			// Byte-identical to each other, not to HOST: every turn of the epoch
+			// returns the same blanked prompt.
+			allByteIdentical: during.every((t) => t.final === dead.final),
+			markerBlanked: during.every((t) => !t.final.includes(MARKER)),
 		},
 		{
 			controlInjects: true,
-			firstTurnInjected: false,
-			laterTurnsInjected: false,
+			firstTurnCarriesABlock: false,
+			laterTurnsCarryABlock: false,
 			allByteIdentical: true,
+			markerBlanked: true,
 		},
 	);
 	// The control that keeps the check honest: at the NEXT boundary it does inject.
@@ -646,18 +653,23 @@ for (const [label, mode] of [
 	await h.start();
 	const t = await h.turn(HOST);
 	check(
-		"Server unreachable at the very first boundary: nothing is returned and the marker line is left intact",
+		"Server unreachable at the very first boundary: the marker is blanked and no block appears",
 		{
 			controlInjects: control.injects,
-			returned: t.returned,
-			byteIdentical: t.final === HOST,
-			markerIntact: t.final.includes(MARKER),
+			// A fresh process has no earlier block to fall back on, so this epoch has
+			// nothing to say. It still owns the marker: the note was addressed to this
+			// extension, and leaving it in the prompt would hand the model an
+			// instruction meant for us. The person hears about it once, out of band.
+			carriesABlock: blockOf(t, HOST).length > 0,
+			markerBlanked: t.final.includes(MARKER),
+			// Everything around the marker survives untouched.
+			restIntact: t.final.includes("Commit messages are written in English."),
 		},
 		{
 			controlInjects: true,
-			returned: false,
-			byteIdentical: true,
-			markerIntact: true,
+			carriesABlock: false,
+			markerBlanked: false,
+			restIntact: true,
 		},
 	);
 	// Control: the identical setup with a healthy bank does inject, so the check

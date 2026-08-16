@@ -315,12 +315,23 @@ export function buildUserBlock(
 	};
 }
 
+/** Does this text carry a marker we understood? */
+export function hasMarker(text: string): boolean {
+	return findMarkers(text).some((h) => h.spec);
+}
+
 /**
- * Put the block where the markers are, or report that there is nothing to do.
+ * Put the block where the markers are — or, with nothing to put there, take the
+ * markers out.
  *
- * Only markers that parsed are replaced: an unparseable one is left exactly as
- * written, so the mistake stays visible instead of being papered over with
- * somebody else's answer.
+ * Blanking rather than leaving them is the point. A marker we could not answer
+ * is a note addressed to this extension, and leaving it in the prompt asks the
+ * model to make sense of an instruction that was never meant for it. The reader
+ * who has to know is the person, and they are told through the widget and a
+ * warning — never through the context.
+ *
+ * Only markers that parsed are touched: an unparseable one is left exactly as
+ * written, so the mistake stays where its author can see it.
  *
  * Rebuilt line by line rather than by String.replace: a fact may contain `$&`
  * or `$1`, which replace() expands as a substitution pattern and would quietly
@@ -328,7 +339,7 @@ export function buildUserBlock(
  */
 export function applyUserBlock(
 	systemPrompt: string,
-	block: string,
+	block: string | undefined,
 ): string | undefined {
 	const hits = findMarkers(systemPrompt).filter((h) => h.spec);
 	if (hits.length === 0) return undefined;
@@ -337,7 +348,7 @@ export function applyUserBlock(
 	let at = 0;
 	for (const hit of hits) {
 		while (at < hit.from) out.push(lines[at++] ?? "");
-		out.push(block);
+		if (block) out.push(block);
 		at = hit.to + 1;
 	}
 	while (at < lines.length) out.push(lines[at++] ?? "");
