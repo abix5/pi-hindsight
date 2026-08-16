@@ -1,828 +1,244 @@
 # pi-hindsight
 
-Long-term project memory for the [pi coding-agent](https://github.com/earendil-works/pi),
+Long-term memory for the [pi coding-agent](https://github.com/earendil-works/pi),
 backed by a local [Hindsight](https://github.com/threadway/hindsight) instance.
 
 > **Need Hindsight running first?** On macOS the fastest way to spin up a local
 > instance is [**hindsight-setup**](https://github.com/abix5/hindsight-setup) —
 > simple and quick.
 
-pi-hindsight gives the agent a durable memory of your project that survives across
-sessions and context compaction. It works in two directions:
-
-- **Recall** — before each turn it searches the memory bank and injects the few
-  most relevant facts into the agent's context, so past decisions, pitfalls and
-  project facts are not forgotten or re-derived.
-- **Memorize** — when the conversation is compacted (or on demand), it extracts
-  the durable *system knowledge* from the slice that is about to be discarded,
-  de-duplicates it against what the bank already knows, and stores only what is
-  new — all in the background, without blocking the agent.
-
-A small status widget shows both contours live, on one line:
+The extension gives the agent a durable memory of your project that survives
+sessions and context compaction. Before each turn it searches the memory bank
+and injects the few most relevant facts (**recall**); when the conversation is
+compacted, saved on demand, or the session ends, it extracts the durable
+knowledge from the slice about to be discarded, de-duplicates it against the
+bank, and stores only what is new — in the background, never blocking the agent
+(**memorize**). A one-line widget shows both contours live:
 
 ```
 🧠 ● pi-hindsight ↙↗ 16d 153f · ↙ recall · 12→3 · db migration command
 ```
 
-Bank dot · bank id · auto-mode · bank size (`16d` documents, `153f` facts) ·
-the last memory action. Auto-mode markers: `↙` = recall, `↗` = retain,
-`auto off` = both disabled. The markers **and the bank id** are bright while
-both contours are on, and dim as soon as either is off — so a glance tells you
-whether automatic memory is fully running. On a recall, `12→3` is
-*found → injected* (the rest were already seen this session).
+## The two banks
 
----
+Memory lives in a **project bank** and, optionally, a shared **user bank**.
+
+The project bank holds knowledge about the repository you are in: decisions and
+their rationale, constraints, verified know-how, pitfalls, concrete locations.
+Both the automatic write path and the agent's `hindsight_retain` tool write
+here, and per-turn recall reads from here.
+
+The user bank holds standing facts about the **person** — facts that stay true
+in any repository: how you like to work, your tools, your prohibitions. Enable
+it with `userBankId` (or `HINDSIGHT_USER_BANK`); an empty value keeps the
+single-bank behaviour exactly as before. When set, the agent gains a dedicated
+write tool, `hindsight_retain_user`. The automatic capture pipeline is wired to
+the project bank only and structurally cannot reach the user bank — nothing
+lands there unless the tool is called deliberately.
+
+## The user block in the system prompt
+
+What the user bank knows can be placed straight into the agent's instructions.
+Put a marker in an `AGENTS.md` the agent already loads (the global
+`~/.pi/agent/AGENTS.md` is the natural home) and the extension replaces it with
+a `<user_profile>` block built from the user bank.
+
+The multi-line and single-line forms produce identical bytes. Exactly one
+selector is allowed; a marker with anything unparsed in it is refused whole and
+left in the file exactly as written, so the mistake stays where its author can
+see it.
+
+```markdown
+<!-- hindsight:user -->                        bare: the bank's stated facts
+
+<!-- hindsight:user model: user-profile -->    a Hindsight mental model,
+                                               fetched with one plain GET
+
+<!-- hindsight:user
+  query: how does this person prefer to receive reports?
+  limit: 5
+-->                                            a live recall; limit caps the
+                                               facts kept (only with query:)
+```
+
+The block is frozen byte-for-byte for a whole **epoch**, and there are exactly
+two epoch boundaries: session start and a completed compaction. The reason is
+cost: the provider caches the system-prompt prefix, and content that changed
+between turns would invalidate that cache on every turn and multiply the price
+of a long session several-fold.
+
+When a parsed marker cannot be answered — no server, an empty bank, a mental
+model still generating — the marker is **removed** from the prompt rather than
+left in it: it is a note addressed to the extension, not to the model. Nothing
+about the failure reaches the model's context; you are warned once per session
+instead. Within a session, a block built at an earlier boundary survives a
+failed one as a stale cache.
+
+The widget reports the block's state: `≡ 4 facts in prompt this epoch` (frozen
+and injected), `≡ 4 facts · update next epoch` (the bank moved on; the prompt
+follows at the next boundary — writing with `hindsight_retain_user` never
+changes the current prompt), `≡ user block unavailable` (asked for and not
+delivered), and `≡ no user block` (nothing was asked for). The widget head
+compresses the same four readings to `≡4`, `≡4→`, `≡!`, and `≡–`.
 
 ## How it works
 
-### Recall (read path — inline)
+### Recall (read path)
 
-Runs on the `before_agent_start` hook and works in three stages, all on a cheap
-model.
-
-**1. Build the fewest queries that cover the request.** The message plus the
-recent conversation (user/assistant prose, agent thinking, and tool *calls* —
-never tool output) is turned into **1–5 standalone bank queries**. Fewer is
-better: one well-aimed query is the preferred answer, and a second is added only
-when the request spans genuinely separate subjects. Queries are search keys made
-of concrete subjects (paths, identifiers, config keys), never a reworded copy of
-the message. A message that yields no searchable subject even in context (a bare
-"continue" / "ok") skips the lookup entirely.
-
-**2. One independent recall per query, in parallel.** Every query gets its own
-bank call *and* its own verdict: the model scores that query's hits 0–100 and
-keeps only the facts that genuinely answer it. Judging per query — rather than
-once over a merged pool — is what stops a vague query's noise from crowding out
-a precise query's facts, and lets a query that returned only junk be dropped
-whole (score below 25).
-
-**3. Merge into the final block.** Surviving facts are merged best-scoring query
-first, de-duped against facts already injected this session, and capped at
-`recallMaxLines`, so an exhausted line budget costs the *weakest* query its tail.
-The result is an *untrusted reference* block for the current turn. Nothing is
-rewritten or invented — facts are injected verbatim and the main model weaves
-them in. When the bank answers but every fact is judged irrelevant, **nothing**
-is injected.
-
-Two operations are supported:
-
-- `recall` (default) — return the raw relevant facts.
-- `reflect` — ask Hindsight to compose a direct answer from the bank, used only
-  for self-contained factual questions.
-
-If every model in the chain is down, recall degrades to keyword queries and
-injects unjudged hits rather than losing memory entirely.
+Recall runs before each agent turn on a cheap model: it distils the message
+plus recent context into a few standalone bank queries, runs them in parallel,
+has the model judge each query's hits for relevance, and injects the surviving
+facts verbatim as an untrusted-reference block — capped at `recallMaxLines`,
+de-duplicated against what this session already saw. When nothing relevant is
+found, nothing is injected. At a task boundary (a separate detector notices the
+subject changed) a deeper pass runs a wider recall and injects one coherent
+briefing instead of loose bullets.
 
 ### Memorize (write path)
 
-Triggered on context compaction, the manual `/mem-save` command, and — as a
-last-chance safety net — when a session is **quit or replaced by `/new`** (so an
-un-memorized tail is not lost). It is **never** triggered by `/reload` (nothing
-is lost there). Compaction and manual writes are fire-and-forget (the agent
-never waits); the session-close write is awaited before the process exits,
-bounded by a 60s cap so quitting can never hang.
+Memorize fires on compaction, on `/mem-save`, and as a safety net when a
+session quits. The whole pipeline — extract, merge, verify, bank-aware dedup,
+store — runs inside the extension via isolated model calls; no agent turn, no
+context pollution. Every write carries a deterministic `document_id`, so a
+retried write upserts instead of duplicating.
 
-The whole pipeline — distil → merge → verify → **bank-aware dedup** → store —
-runs *inside the extension* via isolated model completions and a direct bank
-write. It is **invisible to the conversation**: no agent turn is triggered,
-nothing is injected into the chat, and the main model never reacts to it. All
-the small-model steps go through a completion API (`complete()`), not a
-conversation turn, so the write never pollutes context.
+### Letting a fact die
 
-The **bank-aware dedup** step is what keeps facts from piling up. Before storing,
-it asks the small model to cluster the note by meaning into a few standalone
-queries, recalls the bank from those angles, and drops any bullet whose meaning
-is already stored **anywhere** in the bank. This is the cross-document
-deduplication that `document_id` *cannot* provide — the id only stops the same
-transcript window from duplicating on re-ingest, not the same fact recurring
-across different windows or sessions. A single whole-note query misses
-already-stored facts on the note's other topics; grouping into a handful of
-topical queries surfaces far more of them at a bounded number of requests.
-
-Every write carries a **deterministic `document_id`** derived from the session
-and the exact transcript window (`pi-` + sha256 of session + first/last entry
-id). Re-ingesting the same window — a retried write, a repeated flush — *upserts*
-the existing document in the bank instead of piling up duplicates. Each
-stored window is also recorded in an append-only journal
-(`.pi/hindsight/dispatch-log.jsonl`), which is what lets `/mem-save all` first
-**delete** this session's previously stored documents from the bank and then
-re-collect the whole session cleanly — no duplicate facts, however the windows
-were cut before.
-
-On startup the extension also syncs two **extraction levers onto the bank
-itself** (`retain_mission` and `observations_mission` via the bank config API):
-plain-language missions that steer Hindsight's own fact extraction and
-observation consolidation toward durable engineering knowledge (decisions +
-rationale, constraints, verified know-how, pitfalls, concrete locations) and
-away from session narration and one-off task chatter. The sync is a no-op when
-the bank already matches.
-
-#### What every write carries: `context` and `metadata`
-
-All four write paths — the automatic session note, the agent's deliberate
-`hindsight_retain`, a document you edited in the Review tab, and
-`hindsight_retain_user` — build their `context` and `metadata` from one helper
-(`src/retain-hygiene.ts`). Neither is decoration: Hindsight splices both
-straight into its own fact-extraction prompt.
-
-The `context` does two jobs.
-
-**It names the speaker**, because that is what decides a fact's type. A
-first-person claim by the bank's own agent is stored as an `experience`;
-everything else is a `world` fact. These notes are knowledge *about* a project,
-not a diary, so the context says in as many words that the assistant is not the
-speaker. Measured on the live server, the same note under a context reading
-*"The assistant is speaking"* came back **40% `experience`**; under the shipped
-wording, **0%**.
-
-**It pins the language**, because nothing else can. Hindsight's extractor is
-ordered to detect the input language and forbidden to translate, there is no
-per-bank language setting, and `retain` has no language field — so a note
-written in the wrong language becomes facts in the wrong language, which is how
-one bank ended up 96 ru / 286 en. An imperative in the `context` overrides it:
-the same Russian note extracted **76% Cyrillic** facts through the old context
-and **0%** through the new one. (The old wording said *"The note is written in
-ru"* — a description, which steered nothing.)
-
-**Keep `memoryLanguage` in agreement with the server.** The extension's
-imperative is only one of the two voices in the room; the Hindsight server has
-its own language settings, and when they disagree they fight over every
-extraction:
-
-- `HINDSIGHT_API_LLM_OUTPUT_LANGUAGE` — forces the language of *all* LLM
-  artifacts the server produces.
-- `HINDSIGHT_API_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE` — the PostgreSQL
-  full-text-search dictionary, default `english`. A Russian bank must set it,
-  otherwise Russian facts are never stemmed and full-text search under-recalls.
-
-There is no way to check this automatically: `GET /v1/{ns}/banks/{bank}/config`
-returns 45 keys and no language key among them (verified against a live 0.9.1
-server), so the server's language settings are invisible to the extension.
-Keeping the three in agreement is left to you.
-
-The `metadata` is stored on every fact the document produces and returned with
-every recalled hit. A **project** write carries four fields: `source` (which
-write path produced it), `project`, `session`, and `language` (the language
-that was *asked* for — without it, a config flipped mid-life is invisible
-afterwards). A **user-bank** write carries `source`, `session`, `language`, and
-`scope: "user"` where the project write puts `project` — naming the checkout
-that happened to be open would assert the opposite of what that bank is for.
+A bank that only grows eventually asserts things that stopped being true, so
+the write path may retire a bank fact (`factInvalidation`, on by default) —
+but only an orphan that consolidation can never fix, such as a duplicate or a
+fact about deleted code, and only with a verbatim transcript quote as
+evidence, re-checked in code before the kill. A failure here never costs the
+write itself. Every kill is auditable: `/mem` → Log shows it as a `↓ … retire`
+row with the quote that condemned it, and pressing `u` on that row puts every
+fact the entry killed back into the bank and into recall — one keypress,
+row-granular — while a `restore` entry is appended to the log so the history
+stays honest. Set `HINDSIGHT_FACT_INVALIDATION=0` if you would rather your
+facts never die.
 
 ### Review (`/mem` → Review tab)
 
-Documents are stored to the bank **immediately** (so dedup and recall always
-work against fresh knowledge), and every stored document is also placed in a
-**global review queue** (`~/.pi/hindsight/review-queue.jsonl`, shared across
-all projects). `/mem` opens a TUI panel right in the terminal; the **Review**
-tab walks the pending documents (newest first) showing each one's full text,
-fact count, project and trigger — so you can:
-
-- **Approve** (`a`) — you are done with it; removes it from the queue (the bank
-  is untouched).
-- **Edit** (`e`) — fix the text in place; the document is re-stored under the
-  *same* `document_id`, so the bank replaces the old facts with the corrected
-  ones.
-- **Delete** (`d`) — remove the document and its facts from the bank entirely.
-
-Queue entries whose document never made it to the bank (a run that produced
-nothing durable) are dropped automatically. The queue is an append-only event
-log, so parallel pi sessions can write to it safely.
-
-A document nobody looks at for **7 days** is approved automatically, so the
-queue cannot grow without bound. That costs nothing in memory: approving never
-touched the bank in the first place — the document was stored the moment it was
-enqueued, and `d` is the only action that removes anything. Every `done` event
-that no human caused is marked with a `by` field — `"expiry"` when the entry
-aged out, `"auto"` when there was nothing left to review (a malformed id, or a
-document the bank no longer has) — so an unmarked event, and only an unmarked
-one, means a person actually looked. Change the window with
-`HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS`, or set it to `0` to keep everything
-pending until you review it by hand.
-
-### Pointers & `/mem-retain`
-
-Two markers track memory, answering different questions:
-
-- **Watermark** — *how far through the transcript* has been memorized. It only
-  moves forward; the next write resumes right after it. `/mem-mark` advances it
-  to now **without writing** (mark everything so far as already processed).
-- **Saved ranges** — *which blocks were already stored out-of-band* by
-  `/mem-retain`. `/mem-retain <prompt>` hands the agent a study task; the
-  agent gathers what it needs and stores the durable facts immediately (so it
-  works even with auto-retain off). The transcript range of that work is
-  recorded, and at the next memorize it is wrapped in `ALREADY SAVED` markers so
-  the extractor sees it for context but does **not** extract those facts a
-  second time — no duplicates, no bank lookup, and the agent can keep using the
-  facts in the conversation. The range is dropped once the watermark passes it.
-
----
+Every stored document also lands in a global review queue. The `/mem` panel's
+Review tab walks pending documents so you can approve, edit (re-stored under
+the same id, replacing the old facts), or delete them. An entry nobody touches
+for 7 days is approved automatically (`reviewAutoApproveDays`; `0` keeps
+everything pending). That costs nothing: the document was already stored in
+the bank the moment it was enqueued, so approval leaves the bank untouched —
+delete is the only action that removes anything. The review log records who
+ended a review: an entry without a name means a person did it, `expiry` or
+`auto` means the machinery did. Since 0.4.1 the memory-collection notice in
+the chat also no longer doubles its 🧠 emoji next to the widget's.
 
 ## Requirements
 
-- **pi coding-agent** (provides the extension runtime, model registry, and host
-  packages used by the extension APIs).
+- **pi coding-agent** and **bun** (the extension runs as TypeScript).
 - A running **Hindsight** HTTP API — by default `http://localhost:8888`,
-  namespace `default`. On macOS, the easiest way to get one is
-  [**hindsight-setup**](https://github.com/abix5/hindsight-setup).
-  **v0.8.4+** recommended: recall uses `prefer_observations` (provenance-based
-  dedup of raw facts superseded by observations). Older servers just ignore the
-  flag — no error, but no server-side dedup either.
-- **bun** — the extension runs as TypeScript.
-- **A small model** in your pi model registry for the recall/write pipeline
-  (`recallModelId` / `retainModelId`). A single cheap model is enough. See
-  *Configuration*.
-
-No taskflow, `jq`, or `curl` is needed — the write path runs entirely in-process.
-
----
+  namespace `default`. On macOS, use
+  [**hindsight-setup**](https://github.com/abix5/hindsight-setup); v0.8.4+ is
+  recommended.
+- A small model in your pi registry for the recall/write pipeline; one cheap
+  model for both roles is enough.
 
 ## Install
-
-The package declares `pi.extensions`, so the simplest install is:
 
 ```bash
 pi install npm:@abix5/pi-hindsight
 ```
 
-That registers the extension for pi automatically — then jump to step 3
-(models) and step 4 (declare a bank).
+The package declares `pi.extensions`, so this registers the extension
+automatically. (Manual alternative: `npm install -D @abix5/pi-hindsight` and a
+one-line loader at `.pi/extensions/hindsight.ts` re-exporting the package.)
 
-Prefer to wire it by hand (or develop locally)? Do it manually:
-
-1. **Install the package**:
-
-   ```bash
-   npm install -D @abix5/pi-hindsight
-   ```
-
-   Or clone it somewhere stable if you prefer local development:
-
-   ```bash
-   git clone https://github.com/abix5/pi-hindsight.git ~/tools/pi-hindsight
-   ```
-
-2. **Add a loader** in your project at `.pi/extensions/hindsight.ts`:
-
-   ```ts
-   export { default } from "@abix5/pi-hindsight";
-   ```
-
-   For a local clone, point at the source path instead:
-
-   ```ts
-   export { default } from "/absolute/path/to/pi-hindsight/src/index.ts";
-   ```
-
-   (Running pi *inside this repo* works out of the box — a loader is already
-   present.)
-
-3. **Set your models** globally in `~/.pi/agent/hindsight.json` (see
-   *Configuration*): `recallModelId` and `retainModelId`. A single cheap model
-   for both is fine.
-
-4. **Declare a bank** in the project's `.pi/hindsight.json` to activate the
-   plugin here (see below), trust the project, then `/reload` in pi. Without a
-   project bank the plugin stays **dormant** — no recall, no widget — so the
-   loader is safe to keep globally and only wakes up in projects you opt in.
-
-5. Open the panel with `/mem` → the **Status** tab confirms the bank
-   connection; the **Settings** tab is where you configure everything visually.
-
----
+Then set your models once in the global `~/.pi/agent/hindsight.json`, declare a
+bank in the project's `.pi/hindsight.json`, and `/reload`. Without a project
+bank the plugin stays **dormant** — no recall, no widget — so the extension is
+safe to keep installed globally and only wakes in projects that opt in. Open
+`/mem` → Status to confirm the connection; the Settings tab edits everything
+visually and writes each preference to the right file.
 
 ## Configuration
 
-Config is merged from three layers, later wins:
-**env defaults → global `~/.pi/agent/hindsight.json` → project `.pi/hindsight.json`**.
-
-Put shared settings (baseUrl, namespace, models, language, missions, effort,
-categories, auto-flags) in the **global** file once, and keep only the
-per-project **bank** (and any project-specific overrides) in the project file.
-The easiest way to edit both is the `/mem` panel's **Settings** tab, which
-writes the bank id to the project file and every other preference to the global
-one.
-
-### Activation is gated on a bank
-
-The plugin only runs in a project that declares a bank:
-
-- `"bankId": "my-project"` in the **project** file → active, uses that bank.
-- `"bankId": "auto"` (project **or** global) → active, bank = project folder
-  slug. Set it globally to opt every project in with a folder-derived bank.
-- No bank declared anywhere → **dormant** (a concrete `bankId` set only in the
-  *global* file is ignored on purpose, so all projects never collapse into one
-  shared bank).
-
-A typical **global** `~/.pi/agent/hindsight.json`:
-
-```json
-{
-  "baseUrl": "http://localhost:8888",
-  "namespace": "default",
-  "recallModelId": "your-provider/small-model",
-  "retainModelId": "your-provider/small-model",
-  "memoryLanguage": "en",
-  "autoRecall": true,
-  "autoMemorize": true,
-  "recallFilter": "model",
-  "recallEffort": "normal",
-  "recallMaxQueries": 8,
-  "recallMaxLines": 8,
-  "recallContextTokens": 5000,
-  "factCategories": {
-    "goal": "on",
-    "decisions": "on",
-    "constraints": "on",
-    "knowhow": "on",
-    "pitfalls": "on",
-    "facts": "on",
-    "code": "off",
-    "domain": "off"
-  }
-}
-```
-
-Then each project you want memory in just declares its bank:
-
-```json
-{ "bankId": "my-project" }
-```
+Config merges three layers, later wins: env defaults → global
+`~/.pi/agent/hindsight.json` → project `.pi/hindsight.json`. Keep shared
+settings global; keep only the bank (and project-specific overrides) in the
+project file.
 
 | Key | Env | Default | Meaning |
 | --- | --- | --- | --- |
-| `bankId` | `HINDSIGHT_BANK` | — (dormant) | Memory bank id; set it (or `"auto"`) to activate the plugin in a project |
-| `userBankId` | `HINDSIGHT_USER_BANK` | `""` (off) | Optional second bank for knowledge that holds across projects; when set, adds the `hindsight_retain_user` tool. Nothing is ever written here automatically. |
+| `bankId` | `HINDSIGHT_BANK` | — (dormant) | Project bank id; set it (or `"auto"` for a folder-derived id) to activate the plugin |
+| `userBankId` | `HINDSIGHT_USER_BANK` | `""` (off) | User bank; adds `hindsight_retain_user` and enables the user block |
 | `baseUrl` | `HINDSIGHT_BASE_URL` | `http://localhost:8888` | Hindsight API base URL |
-| `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace (path after `/v1`) |
-| `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn (toggle in the `/mem` Settings tab) |
-| `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close (toggle in the `/mem` Settings tab) |
-| — | `HINDSIGHT_AUTO_OFF` | `false` | **Kill switch for spawned processes.** Forces both contours off, overriding every config layer (see below) |
-| `recallModelId` | `HINDSIGHT_RECALL_MODEL` | `openai/gpt-5.6-luna` | Model for recall query-building / per-query judging |
-| `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | `openai/gpt-5.6-luna` | Model for the write pipeline (extract / merge / verify / dedup) |
-| `recallModelChain` | `HINDSIGHT_RECALL_MODEL_CHAIN` | `[]` | Ordered fallbacks tried when the recall model fails (the session model is always the last resort) |
-| `retainModelChain` | `HINDSIGHT_RETAIN_MODEL_CHAIN` | `[]` | Ordered fallbacks tried when the retain model fails (the session model is always the last resort) |
-| `recallEffort` | `HINDSIGHT_RECALL_EFFORT` | `normal` | Query ceiling per recall: `light` (2) / `normal` (3) / `thorough` (5) (set in the `/mem` Settings tab) |
-| `recallMaxQueries` | `HINDSIGHT_RECALL_MAX_QUERIES` | `8` | Hard ceiling on total bank queries per recall |
-| `factCategories` | — | all on except code/domain | Tri-state map of which categories to extract (set in the `/mem` Settings tab) |
-| `recallFilter` | `HINDSIGHT_RECALL_FILTER` | `model` | `model` (per-query LLM judge scores hits and drops junk) or `off` |
-| `factInvalidation` | `HINDSIGHT_FACT_INVALIDATION` | `true` | Let the write path retire orphaned bank facts, quote required (see below). A kill is reversible from `/mem` → Log with `u` |
+| `namespace` | `HINDSIGHT_NAMESPACE` | `default` | API namespace |
+| `autoRecall` | `HINDSIGHT_AUTO_RECALL` | `true` | Search memory before each turn |
+| `autoMemorize` | `HINDSIGHT_AUTO_MEMORIZE` | `true` | Write memory on compaction and session close |
+| `recallModelId` | `HINDSIGHT_RECALL_MODEL` | `openai/gpt-5.6-luna` | Model for the read pipeline |
+| `retainModelId` | `HINDSIGHT_RETAIN_MODEL` | `openai/gpt-5.6-luna` | Model for the write pipeline |
+| `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in |
 | `recallMaxLines` | `HINDSIGHT_RECALL_MAX_LINES` | `8` | Max facts injected per turn |
-| `recallContextTokens` | `HINDSIGHT_RECALL_CONTEXT_TOKENS` | `5000` | Recent-context budget for query building (tool output excluded) |
-| `taskDetect` | `HINDSIGHT_TASK_DETECT` | `true` | Run the task-change detector and the deep pass it triggers (see below) |
-| `taskHistoryTurns` | `HINDSIGHT_TASK_HISTORY_TURNS` | `12` | Safety cap on detector history turns (normally truncated at task boundaries) |
-| `taskTitleTail` | `HINDSIGHT_TASK_TITLE_TAIL` | `8` | Past task titles kept in the detector prompt so a RETURN is not read as a new task |
-| `deepRecallQueries` | `HINDSIGHT_DEEP_RECALL_QUERIES` | `5` | Bank queries the deep pass may run |
-| `deepRecallMaxLines` | `HINDSIGHT_DEEP_RECALL_MAX_LINES` | `24` | Judged facts fed to the deep pass synthesis |
-| `bankReminder` | `HINDSIGHT_BANK_REMINDER` | `true` | Inject the "the bank exists, ask it" nudge — in the recall block's tail, or standalone (see below) |
-| `bankReminderTurns` | `HINDSIGHT_BANK_REMINDER_TURNS` | `5` | Consecutive turns with **no memory block at all** before a standalone nudge is injected |
-| `memoryLanguage` | `HINDSIGHT_MEMORY_LANGUAGE` | `en` | Language all stored memory is written in (code identifiers stay verbatim). Enforced three ways: in the write-path prompts, as an imperative in the retain `context` (which converts facts the bank would otherwise store in the note's own language), and in the periodic reminder that tells the agent what language to `hindsight_retain` in |
-| `retainMission` | `HINDSIGHT_RETAIN_MISSION` | engineering-focused | Bank-side extraction mission, synced to the bank at startup |
-| `observationsMission` | `HINDSIGHT_OBSERVATIONS_MISSION` | engineering-focused | Bank-side observation-consolidation mission, synced at startup |
-| `dispatchLogPath` | `HINDSIGHT_DISPATCH_LOG_PATH` | `.pi/hindsight/dispatch-log.jsonl` | Journal of stored documents (powers `/mem-save all` cleanup) |
-| `countsRefreshMs` | `HINDSIGHT_COUNTS_REFRESH_MS` | `20000` | Widget counter refresh interval |
-| `reviewAutoApproveDays` | `HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS` | `7` | Days a pending review entry waits before it is approved automatically; `0` disables expiry |
-| `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging (full prompts/bodies) — **may leak sensitive data** |
+| `factInvalidation` | `HINDSIGHT_FACT_INVALIDATION` | `true` | Let the write path retire provably obsolete facts |
+| `reviewAutoApproveDays` | `HINDSIGHT_REVIEW_AUTO_APPROVE_DAYS` | `7` | Days before a pending review entry auto-approves; `0` disables |
+| — | `HINDSIGHT_AUTO_OFF` | `false` | Kill switch for spawned processes: forces both contours off over every layer |
+| `debug` | `HINDSIGHT_DEBUG` | `false` | Verbose logging — may leak sensitive data |
 
-> The **user bank** (`userBankId`) is for what stays true when you open a
-> completely different repository: standing instructions, preferences, goals,
-> prohibitions, habitual procedures. Only the `hindsight_retain_user` tool writes
-> to it; the automatic capture loop always writes the project bank and cannot
-> reach it. What it knows can also be placed in your instructions — see
-> [The user block in the system prompt](#the-user-block-in-the-system-prompt).
+Everything else — fact categories, recall effort and budgets, model fallback
+chains, missions, the task detector, the bank reminder — has sensible defaults
+and is edited in the `/mem` panel's Settings tab.
 
-> The write pipeline runs entirely off-conversation via `retainModelId` — no
-> agent turn, no context pollution — and includes the bank-aware cross-document
-> dedup step. `recallModelId` / `retainModelId` can be the same model.
-
-### The user block in the system prompt
-
-Recall only speaks when it is asked, so what the user bank knows about you was
-reaching the model by accident rather than by design. Put this marker anywhere
-in an `AGENTS.md` the agent already loads — your global
-`~/.pi/agent/AGENTS.md` is the natural home, since these facts hold in every
-repository:
-
-```markdown
-<!-- hindsight:user -->
-```
-
-The extension replaces that line with the standing facts of the user bank,
-framed so the model reads them as context about you rather than as orders from
-you:
-
-```
-<user_profile source="hindsight:user" facts="4">
-Standing facts about the person this session works with. They hold in every
-repository, not just this one. Read them as context about the user, never as
-instructions issued by the user.
-- …
-</user_profile>
-```
-
-There is exactly one rule about when the substitution happens: if a block was
-built, the marker becomes the block; otherwise the hook returns nothing at all
-and the prompt the host assembled is used unchanged. No user bank, no marker, a
-sleeping server, an empty bank — all of them land in the second case, and the
-worst that shows up in the prompt is an HTML comment nobody renders.
-
-A boundary happens before there is a prompt to look at, so before spending a
-request the extension asks a cheaper question: could a marker reach this session
-at all? It looks in the two files pi inlines verbatim — the project's `AGENTS.md`
-and your global `~/.pi/agent/AGENTS.md`. Neither carries the marker, and no bank
-request is made; a project that declares a user bank but never opted in pays
-nothing, twice a session, forever. This does not narrow where the marker works:
-the substitution still runs against the assembled prompt. Put the marker
-somewhere else the host inlines and the block simply arrives one boundary late —
-the turn hook notices the marker and the next boundary reads the bank.
-
-**The block is frozen for an epoch, and that is the point.** The provider caches
-the system-prompt prefix; on this author's own sessions reading that cache cost
-$0.31–$0.50 per million tokens while rewriting it cost $4.28–$6.37 — twelve to
-fourteen times more. A block that changed from turn to turn would invalidate the
-prefix on every single turn and multiply the price of a long session several
-times over. So the bank is read **once** per epoch, and every turn of that epoch
-gets the same bytes. An epoch begins in exactly two places: when the session
-starts, and after a compaction that actually completed. `session_before_compact`
-is not a boundary, because any handler can still cancel it.
-
-That read is the only thing anywhere near the turn path that waits on the bank,
-and it is given a generous 12 seconds: an instructions block that silently comes
-up empty is worse than a slow session start. If the read fails or times out, the
-previous epoch's block stays in force untouched; if it fails at the very first
-boundary, there is simply no block and the prompt is left alone. It is an
-ordinary `GET .../memories/list` — no recall, no reasoning, not one model call.
-Facts arrive in `id` order, derived observations are dropped so each fact
-appears once, and a 4000-character ceiling drops surplus facts whole rather than
-cutting a sentence in half.
-
-Each fact is also cut back to what it actually states. The server does not store
-the sentence it was given: `retain` appends ` | Involving: … | <why this was
-worth keeping>`. On this author's user bank that tail is about 40% of the text —
-1155 characters across four facts against roughly 800 without it — and unlike an
-ordinary message it does not scroll away: it settles into the cached prefix and
-is paid for on every turn of the epoch, in order to say "this is a standing
-principle of the user" beside the principle. So the block keeps everything
-before the first ` | Involving: ` and drops the rest; a text without that
-separator is kept whole.
-
-One consequence worth stating plainly: writing to the user bank with
-`hindsight_retain_user` does **not** change the current prompt. The widget says
-so (`≡ 4 facts · update next epoch`); the new fact joins the block at the next
-epoch boundary.
-
-### Task boundaries: one briefing instead of scattered facts
-
-Injecting a handful of loose facts on *every* turn measurably hurts: Hindsight's
-own benchmark of exactly that shape recorded 1.06 corrections per task against
-0.97 with no memory at all — scattered fragments break focus.
-
-So ordinary turns keep the cheap contour (query builder → bank → per-query judge
-→ up to `recallMaxLines` facts), and the expensive pass runs only at a **task
-boundary**. A separate cheap model keeps its own short conversation next to the
-main one — a digest of each answer (first sentence + files written) plus your
-message verbatim — and answers, per turn, whether the work has moved to a
-different subject. On a change the history is dropped, so what remains always
-describes the task in progress; the finished task's title joins a short tail so
-returning to a morning topic is recognised as a *return*.
-
-The deep pass fires on exactly three triggers: the detector said the task
-changed, the first turn of a session, and the first turn after a compaction. It
-runs a wider recall driven by the detector's query, judges each query's hits as
-usual, and then makes **one** cheap-model call that writes a coherent briefing —
-which is injected instead of the bullet list. If any of that fails (the 30s
-ceiling, an aborted turn, a dead chain) the turn falls back to the ordinary
-recall that was already running alongside the detector: a boundary is where
-memory is worth most, so it degrades to today's behaviour, never to nothing.
-
-`POST /reflect` is deliberately **not** used here: measured across four banks it
-takes 28–59s and the curve is flat in bank size (a 10-fact bank still answers in
-28s), because it is an LLM-bound agent loop. The `hindsight_reflect` tool stays
-available for the agent to call deliberately.
-
-The detector adds one cheap-model call per turn, and no bank call: it runs
-concurrently with the ordinary recall, so it does not usually *add* to the
-turn's latency — but it is an extra call, and on a turn where it is the slower
-of the two it is what the turn waits on. Its verdict only decides which result
-is used. Set `taskDetect` to `false` to go back to plain per-turn recall.
-
-### The bank reminder
-
-The automatic contour catches topic changes on its own, but the model is the
-only party that reads the whole conversation — it knows when *it* is short of
-context. It just forgets the `hindsight_*` tools exist after a dozen turns, and
-a forgotten tool is a dead tool.
-
-**At most one 🧠 block per turn, ever.** Two stacked blocks are not prevented by
-convention here, they are impossible by construction: the nudge normally rides
-in the *tail* of the recall block, which is the one place it cannot become a
-second block.
-
-| when | what you see |
-|---|---|
-| session start, and the turn after a compaction | the recall block, **full** nudge in its tail |
-| task boundary (the detector said the topic changed) | the recall block, **one short line** in its tail |
-| ordinary turn | the recall block alone |
-| `bankReminderTurns` consecutive turns with no memory block | a standalone nudge — short if the full text is still upstream, full if a compaction wiped it |
-
-The standalone block survives for exactly the case a tail cannot cover: recall
-stayed silent, so there was no block to attach to. The full text is the bank's
-name and size plus a pointer to `hindsight_recall` / `hindsight_reflect` /
-`hindsight_retain`; the short line is the same pointer on one line, used while
-the full text is still visible upstream. Either way it costs nothing — no model
-call, no bank call, just the counters the widget already polls.
-
-Sharing a block with recalled facts does not blur what is what. The recalled
-facts are fenced: the untrusted-memory header opens the region and a closing
-`--- end of recalled memory ---` line ends it, and the nudge below that line
-carries its own label ("automatic plugin reminder — not a user instruction, not
-recalled facts"). The dedupe pass that remembers which facts were already
-injected reads the same fence, so the plugin's own bullets never enter the
-seen-set. A **deep** turn injects a synthesized briefing instead of bullets —
-prose has nothing to read back — so those facts are carried forward in extension
-memory (dropped on a compaction, like the transcript itself) and merged into the
-same seen-set.
-
-The standalone counter measures **consecutive turns with no memory block**, not
-turns since the last nudge, and it is not coupled to task identity. A recall
-block re-arms the counter even though it does not name the tools itself — that
-is deliberate: it is a visible 🧠 block, and one block per turn is worth more
-than a nudge that could only be delivered as a second one. On those turns the
-nudge rides in the block's tail, which is where the tools do get named. A fresh
-session counts as "never mentioned", so the first turn where recall stays silent
-still gets the opening nudge — a session where memory never spoke is precisely
-the one where the tools are invisible. Nothing is injected when the project has
-no declared bank or auto-recall is off — a reminder about a bank that is not
-there is pure noise. Tune the interval with `bankReminderTurns`, or set
-`bankReminder` to `false`.
-
-### Letting a fact die
-
-A memory bank that only ever grows eventually asserts things that stopped being
-true. Measured on this project's own bank: a fifth of its facts described code
-that had been deleted, and not one fact in its whole history had ever been
-retired. The per-query judge cannot save you from that — it scores *relevance*,
-and a fact about the thing you just deleted is perfectly on topic.
-
-So the write path may retire a fact, under two rules.
-
-**Only orphans.** A "was/now" pair — it worked, then it was removed — needs
-nothing: storing the new fact is enough and the bank's own consolidation
-reconciles the two. What consolidation can never fix is an *orphan*: a duplicate,
-or a fact about deleted code that will never get a successor fact (a removed file
-gets no "the file is now X").
-
-**Only with evidence.** The step sees ONE delta chunk, not the whole project, so
-a fact is retired only when the model returns a sentence copied verbatim from the
-transcript showing the subject died — and that quote is then re-checked against
-the transcript **in code**. "Occurs in the transcript" is not enough on its own:
-every single letter occurs in every transcript, so the quote must also be
-sentence-sized (at least 20 characters and 4 words after whitespace/case
-normalization) before the substring check means anything. No quote, a quote too
-short to be evidence, or a quote that is not actually there, and the fact
-survives. The quote is sent as the invalidation reason, so every kill
-stays auditable next to the fact it retired. Invalidation is reversible and the
-row stays in the bank.
-
-Failure here never costs you the write: a refused PATCH, a junk verdict or a
-model outage all end with the memory stored. Observations are skipped (they are
-derived and regenerate), and so is a delta too large to fit one model window,
-since a truncated transcript cannot verify a quote.
-
-**A kill is reversible from inside pi.** Every kill is written to the log with
-the retired fact's text and the quote that condemned it, so `/mem` → Log shows
-exactly what died and why — as a `↓ … retire` row, `Enter` for the detail. Press
-**`u`** on that row and every fact the entry killed goes back to `state: valid`
-in the bank and reappears in recall. It is row-granular: one keypress undoes the
-whole decision the write path made about that delta, with no per-fact picking.
-Restoring appends a new `restore` log entry as a `↑ … restore` row — the original
-retire row is never rewritten, so the history stays honest about what was retired
-and what was taken back. No manual API PATCH is needed.
-
-**This is on by default as of 0.4.1.** It was not, for one release: a kill is
-the one memory action that removes knowledge, and it shipped off until two
-things were true. Both now are. Undoing a kill no longer needs an API call, and
-the judge has been watched making a real decision on a real bank — its first
-live kill retired a fact claiming a file existed that had been deleted a release
-earlier. Set `HINDSIGHT_FACT_INVALIDATION=0`, or `factInvalidation` to `false`,
-if you would rather your facts never die.
-
-There is deliberately no bank-cleanup command: the mechanism handles new writes
-and the backlog clears itself as work proceeds. Note that reprocessing a document
-resets the curation of every fact it produced.
-
-### Turning the automatic contours off
-
-The tools (`hindsight_recall` / `hindsight_reflect` / `hindsight_retain`) and the
-background contours are independent: you can keep memory reachable **on demand**
-while nothing happens automatically.
-
-**`--mem-only-tools` — tools and nothing else.** The intended mode for workflow
-subtasks and scripted runs:
-
-```bash
-pi --mem-only-tools -p "..."
-```
-
-The extension registers the three bank tools and **stops**: no widget, no
-commands, no session hooks, no background timers, no pre-turn recall, no write
-on compaction or exit. Config layers are still read, so a declared bank is used
-when there is one. Fully ephemeral subagents (`pi --no-session`) already behave
-this way without the flag.
-
-**Softer switches**, when you want the plugin loaded but quiet:
-
-- `/mem-auto off` — both contours off for this session (`/mem-auto recall` or
-  `retain` toggles just one). Session-scoped; nothing is written to disk.
-- `HINDSIGHT_AUTO_OFF=1` — same thing for a spawned process, but the widget,
-  commands and hooks still load.
-
-  Ordinary config keys follow `env → global file → project file`, so a project
-  that opted into `"autoRecall": true` would otherwise re-enable it inside the
-  child process. This flag is applied **last, on top of every layer**, so a
-  parent can always guarantee silence in the processes it spawns.
-
-### Model fallback
-
-Every memory model call walks a chain rather than trusting one provider:
-`<role>ModelId` → each id in `<role>ModelChain` → **the session's own model**.
-A candidate that errors (auth failure, timeout, 5xx) is logged and the next one
-answers; only Esc/abort stops the walk. If *every* model is unreachable, recall
-still queries the bank — it degrades to keyword queries distilled from your
-message instead of skipping memory for that turn (the trace says `degraded`).
-
----
+Keep `memoryLanguage` in agreement with the server, which has its own two
+language switches: `HINDSIGHT_API_LLM_OUTPUT_LANGUAGE` forces the language of
+all LLM artifacts the server produces, and
+`HINDSIGHT_API_TEXT_SEARCH_EXTENSION_NATIVE_LANGUAGE` sets the PostgreSQL
+full-text-search dictionary (default `english` — a Russian bank must set it,
+or Russian facts are never stemmed and full-text search under-recalls). The
+extension cannot verify the agreement: `GET /v1/{ns}/banks/{bank}/config`
+returns no language key at all, so keeping the three settings in agreement is
+left to the reader.
 
 ## Commands & shortcuts
 
-Six commands, plus one TUI hub for everything else:
-
 | Command | What it does |
 | --- | --- |
-| `/mem` | Open the **panel** in the terminal: Status · Settings · Review · Log. This is the single place for configuration, document review, history, and health. Works even when the project is dormant (set a bank in Settings to activate). |
-| `/mem-save [all]` | Save the accumulated context now. `/mem-save all` re-collects the **whole** session (deletes this session's previously stored documents first, then re-ingests). |
-| `/mem-retain <prompt>` | Have the agent study something and store it to the bank now (works even with auto-memorize off). |
-| `/mem-recall <query>` | Ad-hoc search of the memory bank. |
-| `/mem-mark` | Mark everything up to now as processed (move the pointer, write nothing). |
-| `/mem-auto [on\|off\|recall\|retain]` | Toggle the background contours **for this session**. No argument prints the current state; `on` / `off` switch both; a bare `recall` or `retain` toggles just that one, and `recall off` / `retain on` set it explicitly. Nothing is written to disk — use the `/mem` Settings tab to persist. |
-| `alt+h` | Open the same panel straight from the keyboard. |
+| `/mem` | Open the panel: Status · Settings · Review · Log. The single place for configuration, review, history and health. `alt+h` opens it too. |
+| `/mem-save [all]` | Save the accumulated context now; `all` re-collects the whole session cleanly. |
+| `/mem-retain <prompt>` | Have the agent study something and store it immediately. |
+| `/mem-recall <query>` | Ad-hoc search of the project bank. |
+| `/mem-mark` | Mark everything up to now as processed without writing. |
+| `/mem-auto [on\|off\|recall\|retain]` | Toggle the automatic contours for this session only. |
 
-One CLI flag, for spawning agents that must stay silent:
-
-| Flag | What it does |
-| --- | --- |
-| `--mem-only-tools` | Register the `hindsight_*` tools and nothing else — no widget, commands, hooks, timers, or automatic recall/retain (see below). |
-
-Everything else that used to be its own command — fact categories, recall
-effort, status, log, document review — now lives in the `/mem` panel's tabs.
-
-### Panel navigation
-
-The panel has two focus levels, so a list inside a tab can never swallow the
-tab keys:
-
-| Key | Where | What it does |
-| --- | --- | --- |
-| `←` / `→` / `Tab` / `Shift+Tab` | anywhere | Switch tab — works even from inside a list |
-| `Enter` / `↓` | tab strip | Descend into the active tab's content |
-| `Esc` | content | Back to the tab strip |
-| `Esc` / `q` | tab strip | Close the panel |
-| `r` | anywhere | Reload what the active tab shows |
-| `↑` / `↓` | content | Move the cursor (settings row, document, log entry) |
-| `Enter` / `Space` | Settings | Change the selected setting |
-| `a` / `e` / `d` | Review | Approve / edit / delete the shown document |
-| `PgUp` / `PgDn` | Review | Scroll a long document |
-| `Enter` | Log | Expand the selected entry |
-
-### Agent tools
-
-The extension also registers tools the agent (and subagents) can call directly:
-`hindsight_recall`, `hindsight_reflect`, `hindsight_retain`.
-
-Injected memory appears in the chat as a `🧠 recall` block; a memory write shows
-live on the widget (see below).
-
----
+The agent itself gets `hindsight_recall`, `hindsight_reflect`,
+`hindsight_retain`, and — with a user bank — `hindsight_retain_user`. For
+spawned agents that must stay silent, the `--mem-only-tools` CLI flag registers
+the tools and nothing else: no widget, no hooks, no automatic memory.
 
 ## What gets stored
 
-Memory is **facts only, never invented** — extractive from the actual
-conversation. Stored: goals, decisions with their rationale, standing
-constraints/preferences, verified know-how, pitfalls (what was tried and
-failed), and non-obvious facts & locations (paths, endpoints, env-var *names*,
-ports).
-
-Never stored: code diffs or raw tool output, assistant chatter, unexecuted
-plans, status updates ("README updated…", "I will check…"), completed one-off
-task goals, hedged guesses, transient details (line numbers, timestamps, run
-ids), or **secret values** — only *where* a secret lives (env-var name, config
-path) is kept.
-
-Every candidate bullet must pass a **future-value test**: it is stored only if
-a future agent knowing it would act differently — skip a re-discovery, avoid a
-repeated failure, respect a standing constraint, or find something faster.
-Most transcript slices contain nothing durable, and an empty result is a
-normal outcome, not a failure.
-
-All memory is written in one configured language (`memoryLanguage`, default
-English) regardless of the conversation's language, so the same fact never
-exists in two tongues and semantic search stays sharp. The write-path prompts
-alone are not enough for that: Hindsight's own extractor is ordered to keep the
-input's language and forbidden to translate, so anything reaching the bank in
-another language — above all a `hindsight_retain` the agent wrote mid-Russian
-conversation — becomes facts in that language. The retain `context` carries the
-language as an imperative, which converts them at extraction time. The `dedup`
-phase and deterministic `document_id`s mean the same fact is not stored twice,
-even across sessions.
-
-### Fact categories (`/mem` → Settings)
-
-*What* gets harvested is configurable. Each category is **tri-state**:
-
-- `✓` **on** — extract it: its heading + guidance + example steer the extractor;
-- `○` **off** — neutral: not mentioned at all (neither asked for nor forbidden);
-- `✗` **ban** — explicitly excluded: the extractor is told to drop it.
-
-| Category | Default | What it captures |
-| --- | --- | --- |
-| Goal | `✓` | The objective and its definition of done |
-| Decisions | `✓` | Choices made + rationale / trade-offs |
-| Constraints & preferences | `✓` | Standing user rules (style, always/never, tooling) |
-| Know-how | `✓` | Verified procedures: commands, configs, fixes that worked |
-| Pitfalls | `✓` | Approaches tried that FAILED, and why |
-| Facts & locations | `✓` | Endpoints, ports, versions, env-var names, where secrets live |
-| Code map | `○` | Which file/symbol holds what, module responsibilities |
-| Domain knowledge | `○` | External / business facts, terminology |
-
-Edit them in the `/mem` panel's **Settings** tab. State lives in
-`.pi/hindsight.json` under `factCategories` and steers the write pipeline's
-extraction.
-
-### Recall effort (`/mem` → Settings)
-
-Recall does not use categories. Instead it turns the user's question plus recent
-context (`recallContextTokens`) into **several** bank queries from different
-angles, picks the relevant hits, and — when set to *thorough* — asks follow-up
-queries based on what it found, until it has enough or the query budget
-(`recallMaxQueries`) runs out.
-
-| Effort | Queries / round | Rounds | Feel |
-| --- | --- | --- | --- |
-| `light` | 1 | 1 | one quick lookup |
-| `normal` (default) | 2–3 | 1 | a few angles, one pass |
-| `thorough` | 3–4 | up to 3 | iterative: later rounds build on earlier hits |
-
----
+Facts only, extracted from the actual conversation and never invented: goals,
+decisions with rationale, standing constraints, verified know-how, pitfalls,
+and non-obvious facts and locations. Never stored: code diffs, raw tool
+output, chatter, unexecuted plans, transient details, or secret values — only
+where a secret lives. Every candidate must pass a future-value test: kept only
+if a future agent knowing it would act differently. All memory is written in
+one configured language regardless of the conversation's language, so the same
+fact never exists in two tongues.
 
 ## Widget legend
 
-One fixed line: `🧠` · bank dot · bank id · auto-mode · bank size · last action.
-The dot is `●` connected, `◐` checking, `○` not checked yet, `⟳` working; when
-the bank is unreachable its complaint replaces the size and the action.
-
-Next to the size sits the state of the user block — but only in a session that
-declared a `userBankId`, so a project without one looks exactly as it always
-did. `≡4` means the block is in this epoch's system prompt and carries four
-facts, `≡4→` means it is still in the prompt but the bank has moved on and the
-prompt follows at the next epoch boundary, and `≡–` means nothing is injected at
-all.
-
-The auto-mode cue and the bank id share one tone, and that tone is the whole
-status: **bright** (`↙↗`) when both auto-recall and auto-memorize are on, **dim**
-as soon as either is off. Dim still names the missing side — a lone `↙` means
-only recall is automatic, a lone `↗` means only retain is, and `auto off` means
-neither is.
-
-The action tail (truncated from the right in a narrow terminal):
-
-```
-↙ waiting for bank… (clears on reply)   lookup in flight; Esc cannot cancel it
-↙ recall · 12→3 · <query>                found 12, injected 3 (rest already seen)
-↙ recall · nothing found · <query>       looked, bank had nothing relevant
-↙ skipped (reason)                      no lookup (meta-question / chit-chat)
-
-↗ <reason> → memory                     memorize started on that trigger
-↗ stored 1 doc · 9 lines                written to the bank
-↗ nothing new to store                  the slice had nothing durable / all known
-↗! <error>                              the write failed
-
-≡ 4 facts in prompt                     the user block is frozen into this epoch
-≡ 4 facts · update next epoch           the bank changed; the prompt follows later
-≡ no user block                         nothing is injected this epoch
-```
-
----
+One fixed line: `🧠` · bank dot (`●` connected, `◐` checking, `○` not yet,
+`⟳` working) · bank id · auto-mode · bank size (`16d` documents, `153f` facts)
+· user-block state (see above; only with a `userBankId`) · last action. The
+auto-mode markers `↙` (recall) and `↗` (retain) are bright while both contours
+are on and dim as soon as either is off. The action tail reads like
+`↙ recall · 12→3 · <query>` (found 12, injected 3), `↗ stored 1 doc · 9 lines`,
+`↗ nothing new to store`, or `↗! <error>` when a write failed.
 
 ## Development
 
 ```bash
-bun install          # dev types only; pi provides the runtime packages
-npx tsc --noEmit     # type-check
+bun install     # dev types only; pi provides the runtime packages
+make check      # typecheck + self-tests
 ```
 
-Source lives in `src/`; the runtime entry is `.pi/extensions/hindsight.ts`
-(a 3-line re-export). After editing `src/`, just `/reload` in pi — no build step.
-
----
+Source lives in `src/`; after editing, `/reload` in pi — no build step.
 
 ## License
 
