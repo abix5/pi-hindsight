@@ -206,11 +206,16 @@ file. Edit the global file for infrastructure shared by every project and the
 project file for what belongs to one repository — or let the `/mem` Settings
 tab write each preference to the right file for you.
 
+After an upgrade, the first session prints the release notes for every version
+you have not seen into the chat — once per version, and never into the model's
+context.
+
 | Path | What lives there |
 | --- | --- |
 | `~/.pi/agent/hindsight.json` | Global config: models, `baseUrl`, `userBankId` — infrastructure |
 | `<project>/.pi/hindsight.json` | Project config: the `bankId` and per-project overrides |
 | `~/.pi/hindsight/review-queue.jsonl` | Review queue — per user, spans all projects |
+| `~/.pi/hindsight/changelog-state.json` | Last release notes you were shown — delete to see them again |
 | `<project>/.pi/hindsight/log.jsonl` | Write/recall log shown in `/mem` → Log |
 | `<project>/.pi/hindsight/delta/` | Collected context chunks awaiting the next write |
 | `<project>/.pi/hindsight/debug.log` | Verbose debug log — exists only with `debug` on |

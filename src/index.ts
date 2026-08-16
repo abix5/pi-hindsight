@@ -3,6 +3,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { showChangelogNotice } from "./changelog.ts";
 import { type HindsightConfig, homeDir, loadConfig } from "./config.ts";
 import { registerCommands } from "./commands.ts";
 import { HindsightClient } from "./hindsight.ts";
@@ -605,6 +606,14 @@ export default function (pi: ExtensionAPI) {
 			autoMemorize: cfg?.autoMemorize,
 		});
 		status.attach(ctx.ui);
+		// The upgrade notice, addressed to the PERSON via ui.notify, never the model.
+		// It fires here — a HOST session with a UI — and nowhere else: workflow agent
+		// sessions returned above, and tools-only / ephemeral / dev-stand-down modes
+		// never register this hook. It runs BEFORE the activation check on purpose:
+		// the notice is about the PLUGIN, not this project's bank, and a person in a
+		// dormant project still upgraded. Synchronous local-file work; it never
+		// throws, so a broken changelog cannot break session start.
+		showChangelogNotice(ctx.ui?.notify?.bind(ctx.ui));
 		if (!cfg || !client) return;
 		// First epoch boundary. Awaited: the runner awaits session_start handlers, so
 		// the block is frozen before the session's first turn can ask for it. It runs
