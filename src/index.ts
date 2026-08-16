@@ -128,33 +128,7 @@ function localDevLoaderPresent(cwd: string): boolean {
  * dispose the host's timer/widget/Memorizer. Only a session that decided it IS
  * the host (see isWorkflowAgentSession) touches this handle.
  */
-type HindsightGlobal = {
-	__piHindsightDispose?: () => void;
-	/**
-	 * Which FILE the instance holding the process was loaded from.
-	 *
-	 * A reload swaps the module but keeps the path; a second COPY of the
-	 * extension has a different one. The two are indistinguishable from the
-	 * disposer handle alone, and they need opposite treatment: a reload should
-	 * take over, a second copy is a misconfiguration that no takeover can fix,
-	 * because pi has no way to unregister the loser's hooks. It keeps answering
-	 * events with its own code — which is how one project ended up writing memory
-	 * twice per compaction and printing a message from a version that had been
-	 * fixed weeks earlier.
-	 */
-	__piHindsightHome?: string;
-};
-
-/**
- * The tail of a module URL — enough to tell two copies apart in one line.
- *
- * The full `file:///Users/…/node_modules/@abix5/pi-hindsight/src/index.ts` would
- * wrap the notification into a paragraph, and the only part that distinguishes
- * the copies is the end of the path.
- */
-function short(url: string): string {
-	return url.split("/").slice(-3).join("/");
-}
+type HindsightGlobal = { __piHindsightDispose?: () => void };
 
 /**
  * True when this SESSION is an in-process workflow agent run from
@@ -615,24 +589,6 @@ export default function (pi: ExtensionAPI) {
 		// Host session: tear down any previous HOST instance still alive in this
 		// process, then take over the global disposer handle.
 		const g = globalThis as unknown as HindsightGlobal;
-		// Two COPIES of the extension in one process (typically a project-local
-		// loader plus the globally installed package) both register hooks, and pi
-		// offers no way to unregister the loser's. Taking over would hide that: the
-		// loser keeps writing memory and printing its own, possibly ancient, output
-		// while the widget shows the winner. Nothing in code can fix it, so say it
-		// out loud instead of leaving the person to explain a ghost.
-		const home = import.meta.url;
-		if (g.__piHindsightHome && g.__piHindsightHome !== home) {
-			appendDebug(ctx.cwd ?? process.cwd(), "event.session_start.duplicate", {
-				mine: home,
-				other: g.__piHindsightHome,
-			});
-			ctx.ui?.notify?.(
-				`\uD83E\uDDE0 two copies of pi-hindsight are loaded in this session (${short(g.__piHindsightHome)} and ${short(home)}) \u2014 memory is written twice; disable one (make global, or pi remove npm:@abix5/pi-hindsight)`,
-				"warning",
-			);
-		}
-		g.__piHindsightHome = home;
 		if (g.__piHindsightDispose && g.__piHindsightDispose !== disposeSelf) {
 			try {
 				g.__piHindsightDispose();
