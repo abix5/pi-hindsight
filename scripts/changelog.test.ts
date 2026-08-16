@@ -57,19 +57,10 @@ check(
 
 console.log("\n== first session after the upgrade announces 0.5.1 ==");
 seedState("0.5.0");
-const host = hostPrompt(agentsMd(1));
 const h1 = newHarness({ cwd: makeCwd("clog-a", {}) });
 await h1.start();
-// Startup announces NOTHING on purpose. pi's showStatus reuses its own chat node
-// while that node is still the last thing in the chat, so the extensions
-// announcing themselves during startup overwrite each other and only the last
-// survives -- ours was erased first by `bank "..." ready` and then, seconds
-// later, by another plugin's `loaded` line. The notice waits for the first turn,
-// where the turn's own output lands after it and pins it for good.
-check("startup itself announces nothing", upgrades(h1).length, 0);
-const turn = await h1.turn(host);
 const first = upgrades(h1);
-check("exactly one upgrade notice, on the first turn", first.length, 1);
+check("exactly one upgrade notice", first.length, 1);
 check(
 	"its first line names the version",
 	first[0]?.message.split("\n")[0],
@@ -91,16 +82,21 @@ check(
 	JSON.parse(fs.readFileSync(statePath, "utf8")).lastNotifiedVersion,
 	"0.5.1",
 );
-// Position, not just presence: nothing of OURS may notify after it inside the
-// same turn, or the chat would overwrite it in place before the turn's output
-// arrives to pin it.
+// Position, not just presence. pi routes an "info" notify to showStatus, which
+// REUSES the previous status node while it is still the last thing in the chat,
+// so a notice followed by another one is overwritten in place and the person
+// sees only the last. That is exactly what happened on the first live run: the
+// release notes were announced, replaced by `bank "..." ready`, and recorded as
+// shown. Being last on every exit path is the behaviour, so it is checked.
 check(
-	"nothing notifies after it",
+	"nothing notifies after it, or the chat would overwrite it in place",
 	h1.notices().at(-1)?.message.startsWith("pi-hindsight updated to"),
 	true,
 );
 
 console.log("\n== nothing of it reaches the model ==");
+const host = hostPrompt(agentsMd(1));
+const turn = await h1.turn(host);
 check(
 	"turn output (prompt + messages) never mentions the notice",
 	JSON.stringify(turn).includes("pi-hindsight updated"),
@@ -111,7 +107,6 @@ h1.done();
 console.log("\n== a second session after the same upgrade stays silent ==");
 const h2 = newHarness({ cwd: makeCwd("clog-b", {}) });
 await h2.start();
-await h2.turn(host);
 check("no second notice", upgrades(h2).length, 0);
 h2.done();
 
@@ -121,8 +116,6 @@ console.log("\n== upgrading straight from 0.4.1 shows 0.5.0 and 0.5.1 ==");
 seedState("0.4.1");
 const h3 = newHarness({ cwd: makeCwd("clog-c", {}) });
 await h3.start();
-// The notice lands on the first turn, not at startup — see the comment above.
-await h3.turn(host);
 const skipped = upgrades(h3);
 check("one notice for the whole gap", skipped.length, 1);
 check(
@@ -147,7 +140,6 @@ console.log("\n== a fresh install is not spammed with the whole history ==");
 fs.rmSync(statePath, { force: true });
 const h4 = newHarness({ cwd: makeCwd("clog-d", {}) });
 await h4.start();
-await h4.turn(host);
 const fresh = upgrades(h4);
 check("one notice with no prior state", fresh.length, 1);
 check(
@@ -180,11 +172,7 @@ const bare = fixture(undefined);
 const bareState = path.join(bare, "state.json");
 showChangelogNotice(record, bare, bareState);
 check("no notice", said.length, 0);
-check(
-	"no state written for a notice never shown",
-	fs.existsSync(bareState),
-	false,
-);
+check("no state written for a notice never shown", fs.existsSync(bareState), false);
 
 console.log("\n== an unparseable CHANGELOG.md is silent ==");
 showChangelogNotice(
@@ -199,25 +187,16 @@ showChangelogNotice(
 );
 check("still no notice", said.length, 0);
 
-console.log(
-	"\n== an unwritable state file does not throw, notice may repeat ==",
-);
+console.log("\n== an unwritable state file does not throw, notice may repeat ==");
 const good = fixture("## 9.9.9\nthe notes for 9.9.9\n");
 // A regular file where a directory is needed: mkdir/write must fail.
-const plug = path.join(
-	fs.mkdtempSync(path.join(os.tmpdir(), "hs-clog-ro-")),
-	"plug",
-);
+const plug = path.join(fs.mkdtempSync(path.join(os.tmpdir(), "hs-clog-ro-")), "plug");
 fs.writeFileSync(plug, "");
 const jammed = path.join(plug, "deeper", "state.json");
 showChangelogNotice(record, good, jammed);
 showChangelogNotice(record, good, jammed);
 check("the notice was shown despite the jammed state", said.length, 2);
-check(
-	"both carry the version line",
-	said[1]?.split("\n")[0],
-	"pi-hindsight updated to 9.9.9",
-);
+check("both carry the version line", said[1]?.split("\n")[0], "pi-hindsight updated to 9.9.9");
 
 console.log("\n== no UI: no notice, and the notice is not swallowed ==");
 const uiless = path.join(os.tmpdir(), `hs-clog-uiless-${process.pid}.json`);
