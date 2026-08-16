@@ -198,7 +198,12 @@ type Mode = "ok" | "error" | "reject" | "hang";
 
 /** The stubbed server, one entry per bank the tests care about. */
 export const bank = {
-	user: { mode: "ok" as Mode, items: [] as BankItem[] },
+	user: {
+		mode: "ok" as Mode,
+		items: [] as BankItem[],
+		/** What a mental model GET answers with, placeholder included. */
+		model: "" as string,
+	},
 	project: { mode: "ok" as Mode, documents: 0, nodes: 0 },
 };
 
@@ -258,6 +263,17 @@ globalThis.fetch = (async (url: any, init: any) => {
 			limit: 200,
 			offset: 0,
 		};
+	else if (target.includes("/mental-models/"))
+		// The server answers 200 with a placeholder while a model is still being
+		// generated, so the stub can serve that state too — it is a real answer the
+		// block has to refuse, not an error path.
+		body = {
+			id: target.slice(target.lastIndexOf("/") + 1),
+			content: bank.user.model,
+			is_stale: false,
+		};
+	else if (target.includes("/memories/recall"))
+		body = { results: bank.user.items };
 	else if (target.endsWith("/stats"))
 		body = {
 			total_documents: bank.project.documents,

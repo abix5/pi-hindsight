@@ -1,10 +1,9 @@
 /** pi-hindsight: long-term project memory over local Hindsight. */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { type HindsightConfig, loadConfig } from "./config.ts";
+import { type HindsightConfig, homeDir, loadConfig } from "./config.ts";
 import { registerCommands } from "./commands.ts";
 import { HindsightClient } from "./hindsight.ts";
 import { appendDebug, appendLog, setDebugEnabled } from "./log.ts";
@@ -13,7 +12,6 @@ import { resolveChain } from "./model.ts";
 import { recallForTurn, type RecallInjectResult } from "./recall.ts";
 import { DEEP_HEADER, FACTS_END, FACTS_HEADER } from "./recall-utils.ts";
 import {
-	type Boundary,
 	forgetFullText,
 	newReminderState,
 	type Nudge,
@@ -30,8 +28,10 @@ import { registerTools } from "./tools.ts";
 import { HindsightStatus } from "./ui.ts";
 import {
 	applyUserBlock,
+	buildModelBlock,
 	buildUserBlock,
-	USER_BLOCK_MARKER,
+	findMarkers,
+	type MarkerSpec,
 } from "./user-block.ts";
 
 export function recallTrace(recall: RecallInjectResult, tail = ""): string {
@@ -290,40 +290,44 @@ export default function (pi: ExtensionAPI) {
 	const USER_BLOCK_CEILING_MS = 12000;
 
 	/**
-	 * Has a marker been seen in a system prompt of this session?
+	 * The spec of the last marker seen in a system prompt of this session.
 	 *
 	 * Set from the turn hook, read at the next boundary. It is what keeps the file
 	 * probe below from being a trap: a marker that arrives from anywhere the probe
 	 * does not know about costs one boundary of delay, not the feature.
 	 */
-	let markerSeen = false;
+	let markerSeen: MarkerSpec | undefined;
 
 	/**
-	 * Could this session's prompt carry the marker at all?
+	 * What, if anything, this session's instructions ask for.
 	 *
-	 * A boundary has no prompt yet — it happens before the first turn — so the
-	 * only way to answer is the instruction files whose text pi inlines verbatim:
-	 * the project's own AGENTS.md and the global ~/.pi/agent/AGENTS.md. This does
-	 * NOT move the substitution: that still keys on the assembled prompt, which is
-	 * what makes the marker work wherever it ends up. It decides one thing only —
-	 * whether to spend a bank request. A project that declares a user bank but
-	 * never wrote the marker would otherwise pay a request at every session start
-	 * and every compaction for a block it can never inject.
+	 * A boundary has no prompt yet — it happens before the first turn — so the only
+	 * way to answer is the instruction files whose text pi inlines verbatim: the
+	 * project's own AGENTS.md and the global ~/.pi/agent/AGENTS.md. This does NOT
+	 * move the substitution: that still keys on the assembled prompt, which is what
+	 * makes the marker work wherever it ends up. It decides two things — whether to
+	 * spend a bank request at all, and which of the bank's answers to ask for.
+	 *
+	 * The first parsed marker wins. Several markers with different selectors would
+	 * be several different blocks, and this contour freezes exactly one per epoch;
+	 * answering the first is predictable, while merging them would not be.
 	 */
-	const markerReachable = (cwd: string): boolean => {
-		if (markerSeen) return true;
+	const markerAsk = (cwd: string): MarkerSpec | undefined => {
+		if (markerSeen) return markerSeen;
 		for (const file of [
 			path.join(cwd, "AGENTS.md"),
-			path.join(os.homedir(), ".pi", "agent", "AGENTS.md"),
+			path.join(homeDir(), ".pi", "agent", "AGENTS.md"),
 		]) {
 			try {
-				if (fs.readFileSync(file, "utf8").includes(USER_BLOCK_MARKER))
-					return true;
+				const spec = findMarkers(fs.readFileSync(file, "utf8")).find(
+					(h) => h.spec,
+				)?.spec;
+				if (spec) return spec;
 			} catch {
 				/* absent or unreadable: no marker to be had here */
 			}
 		}
-		return false;
+		return undefined;
 	};
 
 	/**
@@ -340,23 +344,44 @@ export default function (pi: ExtensionAPI) {
 		if (standDown) return;
 		const ub = userBankOf(cfg);
 		if (!ub) return; // no user bank declared: no request, no widget, no injection
-		if (!markerReachable(cwd)) {
+		const ask = markerAsk(cwd);
+		if (!ask) {
 			appendDebug(cwd, "userblock.epoch.nomarker", { reason });
 			return;
 		}
 		try {
-			const rows = await ub.client.listMemories(
-				USER_BLOCK_LIMIT,
-				undefined,
-				USER_BLOCK_CEILING_MS,
-			);
-			const block = buildUserBlock(rows);
+			let block: { text: string; facts: number } | undefined;
+			if (ask.model) {
+				// One GET of an answer the server already assembled and keeps fresh on
+				// its own trigger. Nothing reasons here, so the boundary pays a request
+				// and not a generation.
+				block = buildModelBlock(
+					await ub.client.mentalModel(
+						ask.model,
+						undefined,
+						USER_BLOCK_CEILING_MS,
+					),
+				);
+			} else if (ask.query) {
+				block = buildUserBlock(
+					await ub.client.recall(ask.query, {}, undefined),
+					ask.limit,
+				);
+			} else {
+				block = buildUserBlock(
+					await ub.client.listMemories(
+						USER_BLOCK_LIMIT,
+						undefined,
+						USER_BLOCK_CEILING_MS,
+					),
+				);
+			}
 			userBlock = block?.text;
 			userBlockFacts = block?.facts ?? 0;
 			userBlockStale = false; // the frozen block and the bank agree again
 			appendDebug(cwd, "userblock.epoch", {
 				reason,
-				rows: rows.length,
+				from: ask.model ? "model" : ask.query ? "query" : "facts",
 				facts: userBlockFacts,
 				chars: userBlock?.length ?? 0,
 			});
@@ -583,8 +608,12 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, _ctx) => {
 		if (standDown || !cfg?.userBankId) return;
 		// Remembered for the NEXT boundary, never acted on here: reading the bank
-		// now is the mid-epoch prompt rewrite this whole design exists to avoid.
-		if (event.systemPrompt?.includes(USER_BLOCK_MARKER)) markerSeen = true;
+		// now is the mid-epoch prompt rewrite this whole design exists to avoid. The
+		// spec is kept, not just the fact that a marker exists, so a marker reaching
+		// the prompt from somewhere the file probe cannot see still says WHICH answer
+		// it wants.
+		const asked = findMarkers(event.systemPrompt ?? "").find((h) => h.spec)?.spec;
+		if (asked) markerSeen = asked;
 		if (!epochDecided) {
 			epochDecided = true;
 			epochInjects =

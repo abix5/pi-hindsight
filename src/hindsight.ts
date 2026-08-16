@@ -388,4 +388,19 @@ export class HindsightClient {
 			30000,
 		);
 	}
+
+	/** GET /v1/{ns}/banks/{bank}/mental-models/{id} — a stored reflect answer. */
+	async mentalModel(
+		id: string,
+		signal?: AbortSignal,
+		timeoutMs?: number,
+	): Promise<unknown> {
+		return this.request(
+			"GET",
+			`${this.bankBase()}/mental-models/${encodeURIComponent(id)}`,
+			undefined,
+			signal,
+			timeoutMs,
+		);
+	}
 }

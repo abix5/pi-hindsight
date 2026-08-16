@@ -15,9 +15,8 @@
  */
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
-import { loadConfig, readProjectOverrides } from "./config.ts";
+import { homeDir, loadConfig, readProjectOverrides } from "./config.ts";
 
 /** An "add" event: a document was stored and now awaits review. */
 export interface AddEvent {
@@ -89,7 +88,7 @@ export type AddInput = Omit<AddEvent, "ev" | "ts"> & { ts?: string };
 export function queuePath(): string {
 	return (
 		process.env.HINDSIGHT_REVIEW_QUEUE ||
-		path.join(os.homedir(), ".pi", "hindsight", "review-queue.jsonl")
+		path.join(homeDir(), ".pi", "hindsight", "review-queue.jsonl")
 	);
 }
 

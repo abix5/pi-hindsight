@@ -219,9 +219,22 @@ export function projectConfigPath(cwd: string): string {
 	return path.join(cwd, ".pi", "hindsight.json");
 }
 
+/**
+ * The user's home directory, honouring `$HOME` when it is set.
+ *
+ * `os.homedir()` alone is not enough: under Bun it answers from the system
+ * account rather than the environment, so a test that redirects `$HOME` is
+ * silently ignored and ends up reading the developer's real `~/.pi`. A verdict
+ * that depends on the machine it runs on is worse than no verdict, and this is
+ * the one line that decides it for every global path below.
+ */
+export function homeDir(): string {
+	return process.env.HOME || process.env.USERPROFILE || os.homedir();
+}
+
 /** Absolute path of the global override file (`~/.pi/agent/hindsight.json`). */
 export function globalConfigPath(): string {
-	return path.join(os.homedir(), ".pi", "agent", "hindsight.json");
+	return path.join(homeDir(), ".pi", "agent", "hindsight.json");
 }
 
 /** Read a JSON override file, keeping only allow-listed keys. Never throws. */
