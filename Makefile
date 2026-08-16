@@ -13,7 +13,7 @@
 LOADER   := .pi/extensions/hindsight.ts
 DISABLED := .pi/extensions/hindsight.ts.disabled
 
-.PHONY: help dev global status install-global remove-global check publish
+.PHONY: help dev global status install-global remove-global check shots publish
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
@@ -62,3 +62,12 @@ check: ## Typecheck + run the self-tests
 
 publish: check ## Typecheck, then publish to npm (needs auth)
 	npm publish
+
+shots: ## Regenerate the README screenshots from the shipped code (needs freeze)
+	@mkdir -p docs/assets
+	@for s in $$(bun scripts/widget-shots.ts --list); do \
+	  freeze --execute "bun scripts/widget-shots.ts $$s" \
+	    -o "docs/assets/$$s.png" --padding 12,16 --margin 0 -r 8 \
+	    --background "#171421" --font.family "Menlo" || exit 1; \
+	done
+	@ls -la docs/assets/*.png
