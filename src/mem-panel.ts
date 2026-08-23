@@ -784,17 +784,27 @@ class MemPanel implements Component {
 		const counts = this.counts
 			? `${this.counts.documents} documents · ${this.counts.facts} facts`
 			: "—";
+		// One row per QUESTION the user asks, not one per config key: "which bank and
+		// is it working", "where does it live", "what happens on read", "on write".
+		// The chains and the two paths keep their own rows because they are long —
+		// merging them would only produce clipped ellipses, which hides facts instead
+		// of condensing them.
 		const rows: Array<[string, string]> = [
-			["Bank", `${cfg.bankId}${cfg.active ? "" : "  (INACTIVE)"}`],
-			["Health", health],
-			["Contents", counts],
+			[
+				"Bank",
+				`${cfg.bankId}${cfg.active ? "" : "  (INACTIVE)"} · ${health} · ${counts}`,
+			],
 			["Endpoint", `${cfg.baseUrl}  ns=${cfg.namespace}`],
-			["Auto recall", cfg.autoRecall ? "on" : "off"],
-			["Auto memorize", cfg.autoMemorize ? "on" : "off"],
-			["Effort", cfg.recallEffort],
+			[
+				"Recall",
+				`auto ${cfg.autoRecall ? "on" : "off"} · effort ${cfg.recallEffort}`,
+			],
+			[
+				"Retain",
+				`auto ${cfg.autoMemorize ? "on" : "off"} · language ${cfg.memoryLanguage}`,
+			],
 			["Recall chain", chains.recall],
 			["Retain chain", chains.retain],
-			["Language", cfg.memoryLanguage],
 			["Project config", projectConfigPath(this.deps.cwd)],
 			["Global config", globalConfigPath()],
 		];
@@ -809,14 +819,6 @@ class MemPanel implements Component {
 				this.theme.fg(
 					"warning",
 					'No bank declared here. Open Settings → "Bank id" to activate memory in this project.',
-				),
-			);
-		if (this.needsReload)
-			out.push(
-				"",
-				this.theme.fg(
-					"warning",
-					"Settings changed — run /reload to apply them.",
 				),
 			);
 		return out;
