@@ -2,7 +2,7 @@ import type {
 	ExtensionAPI,
 	ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { openMemPanel } from "./mem-panel.ts";
+import { openMemPanel, type PanelDeps } from "./mem-panel.ts";
 import { appendDebug } from "./log.ts";
 import { type HindsightConfig, loadConfig } from "./config.ts";
 import type { HindsightClient } from "./hindsight.ts";
@@ -28,6 +28,53 @@ function preview(value: unknown, max = 800): string {
 }
 
 type State = { cfg: HindsightConfig; client: HindsightClient } | undefined;
+
+/**
+ * The panel's dependencies, built once so the two entry points (/mem and alt+h)
+ * cannot drift apart.
+ */
+function panelDeps(
+	ctx: ExtensionContext,
+	cwd: string,
+	s: NonNullable<State>,
+): PanelDeps {
+	return {
+		cwd,
+		loadCfg: () => loadConfig(cwd),
+		client: s.client,
+		modelChains: () => ({
+			recall: resolveChain(ctx, s.cfg, "recall")?.label ?? "(none)",
+			retain: resolveChain(ctx, s.cfg, "retain")?.label ?? "(none)",
+		}),
+		models: modelSource(ctx),
+	};
+}
+
+/**
+ * What the panel's model rows may offer. Scoped models win when the session has
+ * any: that is exactly the set the user restricted themselves to, so offering
+ * the whole catalogue there would suggest ids this session refuses to use.
+ * Absent when the session has no registry, so the rows fall back to plain text.
+ */
+function modelSource(ctx: ExtensionContext): PanelDeps["models"] {
+	const registry = ctx.modelRegistry;
+	if (!registry) return undefined;
+	return {
+		options: () => {
+			const scoped = ctx.scopedModels ?? [];
+			return scoped.length > 0
+				? scoped.map((s) => `${s.model.provider}/${s.model.id}`)
+				: registry.getAvailable().map((m) => `${m.provider}/${m.id}`);
+		},
+		// The same predicate `findModel` applies in src/model.ts, so the panel's
+		// verdict cannot disagree with what the resolver will actually do.
+		resolves: (id) => {
+			const slash = id.indexOf("/");
+			if (slash <= 0) return false;
+			return registry.find(id.slice(0, slash), id.slice(slash + 1)) !== undefined;
+		},
+	};
+}
 
 /** Session-level switches + pending /mem-retain capture, shared with index.ts. */
 type Runtime = {
@@ -58,15 +105,7 @@ export function registerCommands(
 			const s = getState();
 			if (!s) return ctx.ui.notify(`${TAG} not initialized`, "error");
 			try {
-				await openMemPanel(ctx, {
-					cwd,
-					loadCfg: () => loadConfig(cwd),
-					client: s.client,
-					modelChains: () => ({
-						recall: resolveChain(ctx, s.cfg, "recall")?.label ?? "(none)",
-						retain: resolveChain(ctx, s.cfg, "retain")?.label ?? "(none)",
-					}),
-				});
+				await openMemPanel(ctx, panelDeps(ctx, cwd, s));
 			} catch (err) {
 				appendDebug(cwd, "command.mem.error", {
 					error: (err as Error).message,
@@ -299,14 +338,6 @@ async function openLog(ctx: ExtensionContext, s: State): Promise<void> {
 	});
 	if (!s) return ctx.ui.notify(`${TAG} not initialized`, "error");
 	const cwd = ctx.cwd ?? process.cwd();
-	await openMemPanel(ctx, {
-		cwd,
-		loadCfg: () => loadConfig(cwd),
-		client: s.client,
-		modelChains: () => ({
-			recall: resolveChain(ctx, s.cfg, "recall")?.label ?? "(none)",
-			retain: resolveChain(ctx, s.cfg, "retain")?.label ?? "(none)",
-		}),
-	});
+	await openMemPanel(ctx, panelDeps(ctx, cwd, s));
 	appendDebug(cwd, "command.mem-log.done");
 }

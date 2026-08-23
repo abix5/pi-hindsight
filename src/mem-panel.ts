@@ -31,6 +31,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { Component, TUI } from "@earendil-works/pi-tui";
 import {
+	Input,
 	matchesKey,
 	type SettingItem,
 	SettingsList,
@@ -64,7 +65,37 @@ export interface PanelDeps {
 	client: HindsightClient;
 	/** Model chain labels for the Status tab. */
 	modelChains: () => { recall: string; retain: string };
+	/**
+	 * The current session's model registry, offered as input assistance on the two
+	 * model rows. OPTIONAL on purpose: the panel writes GLOBAL config while the
+	 * registry belongs to THIS session, so an id this session cannot resolve is
+	 * still a legal value — and a caller with no registry at all (tests, shots)
+	 * must still get a working panel, degraded to plain text entry.
+	 */
+	models?: {
+		/** Selectable ids, each as `provider/id`. */
+		options: () => string[];
+		/** Whether this session's registry can resolve the id. */
+		resolves: (id: string) => boolean;
+	};
 }
+
+/**
+ * Emitted AFTER the panel closes, on the warning channel. It has to be a warning:
+ * pi routes an "info" notice to a chat node that the next notice overwrites in
+ * place, so the one message that must survive the rest of the turn cannot be one.
+ *
+ * Every clause is backed by the code: the file was patched (`patchConfigFile`
+ * returned ok), this process still runs what `init()` read at the last
+ * `session_start` (src/index.ts), and `/reload` re-runs `session_start` — which
+ * disposes this instance and calls `init()` again, re-reading every key the panel
+ * can write. Nothing here promises a restart, because none is needed.
+ */
+export const RELOAD_WARNING =
+	"\uD83E\uDDE0 Memory settings saved. This session is still running the config it loaded at startup — run /reload to apply them.";
+
+/** Marker appended to a model id the session's registry cannot resolve. */
+const UNKNOWN_MODEL = "(unknown)";
 
 /** Keys edited through a text prompt rather than a value cycle. */
 const TEXT_KEYS = new Set([
@@ -172,32 +203,144 @@ function textValue(deps: PanelDeps, id: string): string {
 }
 
 /**
- * Build the Settings tab's items. Each item writes ONE key to ONE layer: the
- * bank id is project-scoped (it activates the plugin HERE), everything else is
- * global so the preference follows the user across projects.
+ * How a model id is shown. The marker is recomputed on every render instead of
+ * being stored, so it survives a rebuild of the list (`r`) and disappears by
+ * itself once the id resolves.
  */
-function settingItems(
+function modelDisplay(deps: PanelDeps, id: string): string {
+	const value = textValue(deps, id);
+	if (!value) return "(inherited)";
+	return deps.models && !deps.models.resolves(value)
+		? `${value}  ${UNKNOWN_MODEL}`
+		: value;
+}
+
+/** The submenu factories the Settings items are built from. */
+interface Submenus {
+	/** Free-text edit of one key. */
+	text: (id: string) => SettingItem["submenu"];
+	/** Text edit with the session's models offered as a list. */
+	model: (id: string) => SettingItem["submenu"];
+	/** A nested list of related settings, collapsed behind one row. */
+	group: (
+		build: () => SettingItem[],
+		summary: () => string,
+	) => SettingItem["submenu"];
+}
+
+function textItem(
 	deps: PanelDeps,
-	textSubmenu: (id: string) => SettingItem["submenu"],
-): SettingItem[] {
-	const cfg = deps.loadCfg();
-	const project = readProjectOverrides(deps.cwd);
-	const cats = resolveCategories(cfg);
-	const text = (
-		id: string,
-		label: string,
-		description: string,
-	): SettingItem => ({
+	mk: Submenus,
+	id: string,
+	label: string,
+	description: string,
+): SettingItem {
+	return {
 		id,
 		label,
 		currentValue: textValue(deps, id) || "(inherited)",
 		description: `${description} Enter to edit.`,
-		submenu: textSubmenu(id),
-	});
+		submenu: mk.text(id),
+	};
+}
+
+/** Recall tuning: the three knobs that shape ONE recall. */
+function tuningItems(cfg: HindsightConfig): SettingItem[] {
+	return [
+		{
+			id: "recallEffort",
+			label: "Recall effort",
+			currentValue: cfg.recallEffort,
+			values: ["light", "normal", "thorough"],
+			description:
+				"Ceiling on how many separate bank queries one recall may build: light = 2, normal = 3, thorough = 5. The model still uses as few as the request needs.",
+		},
+		{
+			id: "recallFilter",
+			label: "Recall filter",
+			currentValue: cfg.recallFilter,
+			values: ["model", "off"],
+			description:
+				"model = each query's hits are scored by a small model and irrelevant ones dropped (a junk query is discarded whole); off = inject the top candidates as-is.",
+		},
+		{
+			id: "recallMaxLines",
+			label: "Max injected facts",
+			currentValue: String(cfg.recallMaxLines),
+			values: ["4", "6", "8", "12", "16"],
+			description: "Upper bound on facts injected into one turn.",
+		},
+	];
+}
+
+function tuningSummary(cfg: HindsightConfig): string {
+	return `${cfg.recallEffort} · filter ${cfg.recallFilter} · max ${cfg.recallMaxLines}`;
+}
+
+function chainItems(deps: PanelDeps, mk: Submenus): SettingItem[] {
+	return [
+		textItem(
+			deps,
+			mk,
+			"recallModelChain",
+			"Recall fallbacks",
+			"Comma-separated models tried when the recall model fails; the session model is always the last resort.",
+		),
+		textItem(
+			deps,
+			mk,
+			"retainModelChain",
+			"Retain fallbacks",
+			"Comma-separated models tried when the retain model fails; the session model is always the last resort.",
+		),
+	];
+}
+
+function chainSummary(cfg: HindsightConfig): string {
+	const r = cfg.recallModelChain.length;
+	const t = cfg.retainModelChain.length;
+	return r + t === 0 ? "(none)" : `${r} recall · ${t} retain`;
+}
+
+type Category = ReturnType<typeof resolveCategories>[number];
+
+function categoryItems(cats: Category[]): SettingItem[] {
+	return cats.map((c) => ({
+		id: `cat:${c.key}`,
+		label: c.label,
+		currentValue: c.state,
+		values: ["on", "off", "ban"],
+		description: c.clause,
+	}));
+}
+
+function categorySummary(cats: Category[]): string {
+	const n = (state: string) => cats.filter((c) => c.state === state).length;
+	const banned = n("ban");
+	return `${n("on")} on · ${n("off")} off${banned ? ` · ${banned} ban` : ""}`;
+}
+
+/**
+ * Build the Settings tab's items. Each item writes ONE key to ONE layer: the
+ * bank id is project-scoped (it activates the plugin HERE), everything else is
+ * global so the preference follows the user across projects.
+ *
+ * Related keys are collapsed into nested lists so the top level stays a fixed
+ * nine rows: the fact categories alone are eight rows that GROW with the
+ * project's own catalog, which is what made this tab a scrolling wall. Each
+ * group row carries a summary of what is behind it, so nothing is hidden — only
+ * moved one Enter away.
+ */
+function settingItems(deps: PanelDeps, mk: Submenus): SettingItem[] {
+	const cfg = deps.loadCfg();
+	const project = readProjectOverrides(deps.cwd);
+	const cats = resolveCategories(cfg);
 
 	return [
 		{
-			...text(
+			...textItem(
+				deps,
+				mk,
 				"bankId",
 				"Bank id (project)",
 				cfg.active
@@ -223,60 +366,67 @@ function settingItems(
 				"Write the session to memory on compaction and shutdown. Off = only /mem-save writes.",
 		},
 		{
-			id: "recallEffort",
-			label: "Recall effort",
-			currentValue: cfg.recallEffort,
-			values: ["light", "normal", "thorough"],
+			id: "group:recallTuning",
+			label: "Recall tuning",
+			currentValue: tuningSummary(cfg),
 			description:
-				"Ceiling on how many separate bank queries one recall may build: light = 2, normal = 3, thorough = 5. The model still uses as few as the request needs.",
+				"Effort, hit filtering and the cap on injected facts. Enter to open.",
+			submenu: mk.group(
+				() => tuningItems(deps.loadCfg()),
+				() => tuningSummary(deps.loadCfg()),
+			),
 		},
 		{
-			id: "recallFilter",
-			label: "Recall filter",
-			currentValue: cfg.recallFilter,
-			values: ["model", "off"],
-			description:
-				"model = each query's hits are scored by a small model and irrelevant ones dropped (a junk query is discarded whole); off = inject the top candidates as-is.",
+			...textItem(
+				deps,
+				mk,
+				"recallModelId",
+				"Recall model",
+				"Model that rewrites your message into bank queries and judges the hits.",
+			),
+			currentValue: modelDisplay(deps, "recallModelId"),
+			submenu: mk.model("recallModelId"),
 		},
 		{
-			id: "recallMaxLines",
-			label: "Max injected facts",
-			currentValue: String(cfg.recallMaxLines),
-			values: ["4", "6", "8", "12", "16"],
-			description: "Upper bound on facts injected into one turn.",
+			...textItem(
+				deps,
+				mk,
+				"retainModelId",
+				"Retain model",
+				"Model that distils the transcript into stored notes.",
+			),
+			currentValue: modelDisplay(deps, "retainModelId"),
+			submenu: mk.model("retainModelId"),
 		},
-		text(
-			"recallModelId",
-			"Recall model",
-			"Model that rewrites your message into bank queries and judges the hits.",
-		),
-		text(
-			"retainModelId",
-			"Retain model",
-			"Model that distils the transcript into stored notes.",
-		),
-		text(
-			"recallModelChain",
-			"Recall fallbacks",
-			"Comma-separated models tried when the recall model fails; the session model is always the last resort.",
-		),
-		text(
-			"retainModelChain",
-			"Retain fallbacks",
-			"Comma-separated models tried when the retain model fails; the session model is always the last resort.",
-		),
-		text(
+		{
+			id: "group:modelChains",
+			label: "Model fallbacks",
+			currentValue: chainSummary(cfg),
+			description:
+				"Models tried when the recall/retain model fails. Enter to open.",
+			submenu: mk.group(
+				() => chainItems(deps, mk),
+				() => chainSummary(deps.loadCfg()),
+			),
+		},
+		textItem(
+			deps,
+			mk,
 			"memoryLanguage",
 			"Memory language",
 			"Language every stored memory is written in.",
 		),
-		...cats.map((c) => ({
-			id: `cat:${c.key}`,
-			label: `  category · ${c.label}`,
-			currentValue: c.state,
-			values: ["on", "off", "ban"],
-			description: c.clause,
-		})),
+		{
+			id: "group:factCategories",
+			label: "Fact categories",
+			currentValue: categorySummary(cats),
+			description:
+				"What may be remembered, per category: on, off, or banned. Enter to open.",
+			submenu: mk.group(
+				() => categoryItems(resolveCategories(deps.loadCfg())),
+				() => categorySummary(resolveCategories(deps.loadCfg())),
+			),
+		},
 	];
 }
 
@@ -311,10 +461,19 @@ class MemPanel implements Component {
 		private readonly tui: TUI,
 		private readonly theme: Theme,
 		private readonly keybindings: KeybindingsManager,
-		private readonly done: () => void,
+		private readonly done: (wrote: boolean) => void,
 	) {
 		this.settings = this.buildSettings();
 		void this.refreshStatus();
+	}
+
+	/**
+	 * Close the panel, reporting whether anything was written. The caller (not the
+	 * panel) raises the reload warning, which is what puts it AFTER the panel is
+	 * gone instead of in a row nobody reads.
+	 */
+	private close(): void {
+		this.done(this.needsReload);
 	}
 
 	private rerender(): void {
@@ -323,16 +482,40 @@ class MemPanel implements Component {
 
 	private buildSettings(): SettingsList {
 		return new SettingsList(
-			settingItems(this.deps, (id) => this.textSubmenu(id)),
+			settingItems(this.deps, {
+				text: (id) => this.textSubmenu(id),
+				model: (id) => this.modelSubmenu(id),
+				group: (build, summary) => this.groupSubmenu(build, summary),
+			}),
 			// Beyond the rows themselves SettingsList draws a scroll indicator, a blank
 			// line, the selected item's description and a hint line — 5 rows of its own
 			// chrome. Reserve exactly that so the list fills the fixed body without
 			// overflowing it.
-			Math.max(4, this.bodyRows() - 5),
+			this.listRows(),
 			getSettingsListTheme(),
 			(id, value) => this.onSettingChange(id, value),
-			() => this.done(),
+			() => this.close(),
 		);
+	}
+
+	private listRows(): number {
+		return Math.max(4, this.bodyRows() - 5);
+	}
+
+	/**
+	 * Track how deep the Settings list is nested, because the panel intercepts Esc
+	 * before SettingsList ever sees it. Without this, Esc inside a submenu would
+	 * jump out to the tab strip and leave the submenu open underneath, rendering
+	 * over the tab the user thinks they returned to.
+	 */
+	private submenuDepth = 0;
+
+	private enter(close: (value?: string) => void): (value?: string) => void {
+		this.submenuDepth += 1;
+		return (value) => {
+			this.submenuDepth = Math.max(0, this.submenuDepth - 1);
+			close(value);
+		};
 	}
 
 	/**
@@ -340,17 +523,64 @@ class MemPanel implements Component {
 	 * to whatever component we return, and closes it when `close()` is called.
 	 */
 	private textSubmenu(id: string): SettingItem["submenu"] {
-		return (_current, close) =>
-			new ExtensionInputComponent(
+		return (_current, close) => {
+			const done = this.enter(close);
+			return new ExtensionInputComponent(
 				`Memory · ${id}`,
 				undefined,
 				(value) => {
 					this.commitText(id, value);
-					close(this.displayValue(id));
+					done(this.displayValue(id));
 				},
-				() => close(undefined),
+				() => done(undefined),
 				{ tui: this.tui },
 			);
+		};
+	}
+
+	/**
+	 * The model rows: the same free-text commit, with this session's registered
+	 * models offered as a list. Without a registry there is nothing to offer, so
+	 * the row degrades to the plain text prompt rather than showing an empty list.
+	 */
+	private modelSubmenu(id: string): SettingItem["submenu"] {
+		const models = this.deps.models;
+		if (!models) return this.textSubmenu(id);
+		return (_current, close) => {
+			const done = this.enter(close);
+			return new ModelPickerChild(
+				this.theme,
+				`Memory · ${id}`,
+				models.options(),
+				this.listRows(),
+				(value) => {
+					this.commitText(id, value);
+					done(this.displayValue(id));
+				},
+				() => done(undefined),
+			);
+		};
+	}
+
+	/**
+	 * A group of related settings as a nested list. The children write their own
+	 * config directly; closing the group only refreshes the summary shown on the
+	 * parent row.
+	 */
+	private groupSubmenu(
+		build: () => SettingItem[],
+		summary: () => string,
+	): SettingItem["submenu"] {
+		return (_current, close) => {
+			const done = this.enter(close);
+			return new SettingsList(
+				build(),
+				this.listRows(),
+				getSettingsListTheme(),
+				(id, value) => this.onSettingChange(id, value),
+				() => done(summary()),
+			);
+		};
 	}
 
 	/** What the Settings row should show after a text edit. */
@@ -359,6 +589,8 @@ class MemPanel implements Component {
 			return (
 				String(readProjectOverrides(this.deps.cwd).bankId ?? "") || "(none)"
 			);
+		if (id === "recallModelId" || id === "retainModelId")
+			return modelDisplay(this.deps, id);
 		return textValue(this.deps, id) || "(inherited)";
 	}
 
@@ -371,21 +603,41 @@ class MemPanel implements Component {
 				.split(",")
 				.map((s) => s.trim())
 				.filter(Boolean);
-			return this.write({ [id]: list }, scope);
+			this.write({ [id]: list }, scope);
+			return;
 		}
 		// An empty bank id means "deactivate here", so it is written as-is rather
 		// than skipped — the key must actually change in the file.
-		this.write({ [id]: value }, scope);
+		const ok = this.write({ [id]: value }, scope);
+		// A model id this session cannot resolve is still WRITTEN — the config is
+		// global and the id may well exist on another machine — but it must not be
+		// swallowed: the resolver would silently fall through to the chain, which is
+		// exactly how a typo used to disappear without a trace.
+		if (
+			ok &&
+			value &&
+			(id === "recallModelId" || id === "retainModelId") &&
+			this.deps.models &&
+			!this.deps.models.resolves(value)
+		) {
+			this.message = `"${value}" is not in this session's model registry — saved anyway`;
+			this.rerender();
+		}
 	}
 
 	private onSettingChange(id: string, value: string): void {
 		if (TEXT_KEYS.has(id)) return; // handled by the submenu's own commit
+		// A group row carries a summary, not a value: its children already wrote
+		// their own keys. Writing this id would put a display string like
+		// "normal · filter model · max 8" into the config under a key nothing reads.
+		if (id.startsWith("group:")) return;
 		// Fact categories live inside one nested `factCategories` object, so they are
 		// merged into the current block instead of written as a top-level key.
 		if (id.startsWith("cat:")) {
 			const cfg = this.deps.loadCfg();
 			const block = { ...(cfg.factCategories ?? {}), [id.slice(4)]: value };
-			return this.write({ factCategories: block }, "project");
+			this.write({ factCategories: block }, "project");
+			return;
 		}
 		const patch: Record<string, unknown> =
 			id === "autoRecall" || id === "autoMemorize"
@@ -400,13 +652,14 @@ class MemPanel implements Component {
 	private write(
 		patch: Record<string, unknown>,
 		scope: "project" | "global",
-	): void {
+	): boolean {
 		const ok = patchConfigFile(this.deps.cwd, patch, scope);
 		this.message = ok
-			? `saved to ${scope} config — run /reload to apply`
+			? `saved to ${scope} config`
 			: `could not write the ${scope} config file`;
 		this.needsReload = this.needsReload || ok;
 		this.rerender();
+		return ok;
 	}
 
 	private async refreshStatus(): Promise<void> {
@@ -603,7 +856,7 @@ class MemPanel implements Component {
 			return this.switchTab(-1);
 
 		if (this.focus === "tabs") {
-			if (matchesKey(data, "escape") || data === "q") return this.done();
+			if (matchesKey(data, "escape") || data === "q") return this.close();
 			if (
 				matchesKey(data, "enter") ||
 				matchesKey(data, "down") ||
@@ -622,6 +875,12 @@ class MemPanel implements Component {
 
 		// --- content level ---
 		if (matchesKey(data, "escape")) {
+			// An open Settings submenu owns Esc: leaving the tab while it is open would
+			// hide the tab behind a child that keeps rendering over it.
+			if (this.tab === "Settings" && this.submenuDepth > 0) {
+				this.settings.handleInput(data);
+				return this.rerender();
+			}
 			this.focus = "tabs";
 			this.showLogDetail = false;
 			return this.rerender();
@@ -877,6 +1136,85 @@ class MemPanel implements Component {
 	}
 }
 
+/**
+ * Text entry for a model id, with the session's registered models offered as a
+ * list. Picking is assistance, never a gate: the panel writes GLOBAL config and
+ * the registry is per-session, so an id this machine does not know is still a
+ * legal thing to type, and Enter on a typed value commits it verbatim.
+ */
+class ModelPickerChild implements Component {
+	private readonly input = new Input();
+	/** -1 = "use what is typed"; otherwise an index into the filtered options. */
+	private highlight = -1;
+
+	constructor(
+		private readonly theme: Theme,
+		private readonly title: string,
+		private readonly options: string[],
+		private readonly maxVisible: number,
+		private readonly onSubmit: (value: string) => void,
+		private readonly onCancel: () => void,
+	) {}
+
+	/** Options narrowed by what has been typed so far. */
+	private matches(): string[] {
+		const q = this.input.getValue().trim().toLowerCase();
+		return q ? this.options.filter((o) => o.toLowerCase().includes(q)) : this.options;
+	}
+
+	handleInput(data: string): void {
+		const list = this.matches();
+		if (matchesKey(data, "escape")) return this.onCancel();
+		if (matchesKey(data, "enter") || data === "\n") {
+			const picked = this.highlight >= 0 ? list[this.highlight] : undefined;
+			return this.onSubmit(picked ?? this.input.getValue());
+		}
+		if (matchesKey(data, "down")) {
+			this.highlight = Math.min(list.length - 1, this.highlight + 1);
+			return;
+		}
+		if (matchesKey(data, "up")) {
+			this.highlight = Math.max(-1, this.highlight - 1);
+			return;
+		}
+		this.input.handleInput(data);
+		// Typing changes the candidate set, so a stale index would point at a
+		// different model than the highlighted row.
+		this.highlight = -1;
+	}
+
+	invalidate(): void {
+		this.input.invalidate();
+	}
+
+	render(width: number): string[] {
+		const list = this.matches();
+		// Keep the highlighted row on screen; the panel clips, and a clipped picker
+		// cannot be scrolled to the option it is highlighting.
+		const rows = Math.max(1, this.maxVisible - 4);
+		const start = Math.max(0, Math.min(this.highlight - rows + 2, list.length - rows));
+		const view = list.slice(Math.max(0, start), Math.max(0, start) + rows);
+		const hidden = list.length - view.length;
+		return [
+			this.theme.fg("accent", clip(this.title, width)),
+			...this.input.render(width),
+			...view.map((o) => {
+				const i = list.indexOf(o);
+				const row = clip(`${i === this.highlight ? "›" : " "} ${o}`, width);
+				return i === this.highlight ? this.theme.fg("accent", row) : row;
+			}),
+			...(list.length === 0
+				? [this.theme.fg("dim", "  no registered model matches — Enter uses what you typed")]
+				: []),
+			...(hidden > 0 ? [this.theme.fg("dim", `  … ${hidden} more`)] : []),
+			this.theme.fg(
+				"dim",
+				clip("↑/↓ pick a registered model · Enter use it (or the typed id) · Esc cancel", width),
+			),
+		];
+	}
+}
+
 /** Minimal inline yes/no prompt, so delete never needs a nested dialog. */
 class ConfirmChild implements Component {
 	constructor(
@@ -914,8 +1252,14 @@ export async function openMemPanel(
 	ctx: ExtensionContext,
 	deps: PanelDeps,
 ): Promise<void> {
-	await ctx.ui.custom<void>(
+	// The panel reports whether it wrote anything, and the warning is raised HERE,
+	// after `ctx.ui.custom` has resolved — which it only does once the component
+	// called `done()`. The ordering is therefore structural, not a convention: the
+	// notice cannot be emitted while the panel is still on screen. One flag means
+	// one warning, however many settings were changed.
+	const wrote = await ctx.ui.custom<boolean>(
 		(tui, theme, keybindings, done) =>
-			new MemPanel(deps, tui, theme, keybindings, () => done()),
+			new MemPanel(deps, tui, theme, keybindings, (w) => done(w)),
 	);
+	if (wrote) ctx.ui.notify(RELOAD_WARNING, "warning");
 }
