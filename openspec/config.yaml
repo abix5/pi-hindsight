@@ -1,0 +1,51 @@
+schema: spec-driven
+
+context: |
+  Language: en
+  All artifacts must be written in en.
+  Keep OpenSpec structural headings and SHALL/MUST keywords in English.
+
+  Project: pi-hindsight — a pi coding-agent extension that gives the agent a
+  long-term memory backed by a local Hindsight server (0.9.1, ns `default`,
+  http://127.0.0.1:8888). TypeScript, no build step: pi loads `src/index.ts`.
+
+  Conventions that constrain every artifact here:
+  - `make check` is the only authoritative gate: typecheck plus
+    `scripts/*.test.ts`. Count passes with `make check 2>&1 | grep -c '^PASS'`.
+    A new test file is not run until it is registered in the Makefile.
+  - A test that does not fail when the defect it guards is introduced is
+    decoration. Every behavioural task is proved by injecting the defect into
+    the guarded place and recording the resulting FAIL count.
+  - A test whose verdict depends on the developer's machine state is worse than
+    no test: redirect HOME and drop HINDSIGHT_* env vars in self-tests.
+  - Never block the turn path and never add an LLM call on the hot path.
+  - Content that changes between turns must never enter the system prompt: the
+    prompt cache costs 12-14x more to write than to read, so injections happen
+    only at an epoch boundary (session_start, session_compact) and stay
+    byte-identical in between.
+  - Comments explain WHY, not what. Commit messages and repo documents are in
+    English; reports to the owner are in Russian.
+  - Issue tracking is beads (`bd`); openspec tasks.md carries the same slices
+    and names the bead id so the two never diverge.
+
+# Per-artifact rules (optional)
+# Add custom rules for specific artifacts.
+# Example:
+#   rules:
+#     proposal:
+#       - Keep proposals under 500 words
+#       - Always include a "Non-goals" section
+#     tasks:
+#       - Break tasks into chunks of max 2 hours
+
+# Per-operation guidance (optional)
+# Add advisory guidance for how apply and archive work should be conducted.
+# This is separate from artifact rules above.
+# Example:
+#   operations:
+#     apply:
+#       guidance:
+#         - Keep test summaries concise
+#     archive:
+#       guidance:
+#         - Summarize the archive outcome before finishing
