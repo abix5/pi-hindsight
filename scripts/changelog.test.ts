@@ -22,7 +22,7 @@ import {
 } from "./user-block-harness.ts";
 import { showChangelogNotice } from "../src/changelog.ts";
 
-const FIRST_LINE = "pi-hindsight updated to 0.5.1";
+const FIRST_LINE = "pi-hindsight updated to 0.5.2";
 const repoRoot = path.join(import.meta.dirname, "..");
 const pkg = JSON.parse(
 	fs.readFileSync(path.join(repoRoot, "package.json"), "utf8"),
@@ -46,17 +46,17 @@ const upgrades = (h: { notices(): Array<{ message: string }> }) =>
 	h.notices().filter((n) => n.message.startsWith("pi-hindsight updated to"));
 
 // The notice is only honest if these two hold for the release itself.
-check("package.json version is the announced one", pkg.version, "0.5.1");
+check("package.json version is the announced one", pkg.version, "0.5.2");
 check(
 	"CHANGELOG.md ships in the npm package",
 	pkg.files.includes("CHANGELOG.md"),
 	true,
 );
 
-// --- upgrade 0.5.0 → 0.5.1: announced once, model context untouched ---------
+// --- upgrade 0.5.1 → 0.5.2: announced once, model context untouched ---------
 
-console.log("\n== first session after the upgrade announces 0.5.1 ==");
-seedState("0.5.0");
+console.log("\n== first session after the upgrade announces 0.5.2 ==");
+seedState("0.5.1");
 const h1 = newHarness({ cwd: makeCwd("clog-a", {}) });
 await h1.start();
 const first = upgrades(h1);
@@ -67,20 +67,19 @@ check(
 	FIRST_LINE,
 );
 check(
-	"it carries the 0.5.1 notes",
-	first[0]?.message.includes("once per\nversion") ||
-		first[0]?.message.includes("once per version"),
+	"it carries the 0.5.2 notes",
+	first[0]?.message.includes("Works with Pi 1.4"),
 	true,
 );
 check(
-	"it does NOT replay the already-seen 0.5.0 entry",
-	first[0]?.message.includes("## 0.5.0"),
+	"it does NOT replay the already-seen 0.5.1 entry",
+	first[0]?.message.includes("## 0.5.1"),
 	false,
 );
 check(
-	"the bookmark advanced to 0.5.1",
+	"the bookmark advanced to 0.5.2",
 	JSON.parse(fs.readFileSync(statePath, "utf8")).lastNotifiedVersion,
-	"0.5.1",
+	"0.5.2",
 );
 // Position, not just presence. pi routes an "info" notify to showStatus, which
 // REUSES the previous status node while it is still the last thing in the chat,
@@ -112,7 +111,7 @@ h2.done();
 
 // --- skipped a release: both unseen entries arrive in one notice ------------
 
-console.log("\n== upgrading straight from 0.4.1 shows 0.5.0 and 0.5.1 ==");
+console.log("\n== upgrading straight from 0.4.1 shows 0.5.0, 0.5.1 and 0.5.2 ==");
 seedState("0.4.1");
 const h3 = newHarness({ cwd: makeCwd("clog-c", {}) });
 await h3.start();
@@ -144,7 +143,8 @@ const fresh = upgrades(h4);
 check("one notice with no prior state", fresh.length, 1);
 check(
 	"it carries only the current entry, not the back catalogue",
-	fresh[0]?.message.includes("## 0.5.0") ||
+	fresh[0]?.message.includes("## 0.5.1") ||
+		fresh[0]?.message.includes("## 0.5.0") ||
 		fresh[0]?.message.includes("## 0.4.1"),
 	false,
 );

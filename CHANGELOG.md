@@ -3,6 +3,13 @@
 Each `## <version>` entry below is what the extension shows you, once, the
 first time a session starts after an upgrade to that version.
 
+## 0.5.2
+
+Works with Pi 1.4. Runs started by an extension message rather than by your
+prompt no longer crash the auto-recall hook; they simply skip recall. Pi
+packages are now declared as peer dependencies, so Pi no longer warns that the
+extension bundles its own copies of them.
+
 ## 0.5.1
 
 The extension now tells you what changed after an upgrade. The first session
