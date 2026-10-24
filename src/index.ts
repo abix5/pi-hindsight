@@ -745,6 +745,18 @@ export default function (pi: ExtensionAPI) {
 	pi.on("before_agent_start", async (event, ctx) => {
 		if (standDown) return;
 		recallInjected = false; // this turn, until proven otherwise below
+		// Pi 1.4+: a run started by `pi.sendMessage(..., { triggerTurn: true })`
+		// arrives as messageType "custom" with no user prompt. Recall is keyed on
+		// what the person typed, so there is nothing to query for — skip it.
+		// Compared against "custom" (not !== "user") so older hosts, whose event
+		// carries no messageType at all, keep recalling as before.
+		if (event.messageType === "custom") {
+			appendDebug(ctx.cwd ?? process.cwd(), "event.before_agent_start", {
+				messageType: event.messageType,
+				skipped: "no user prompt",
+			});
+			return;
+		}
 		appendDebug(ctx.cwd ?? process.cwd(), "event.before_agent_start", {
 			promptChars: event.prompt.length,
 			autoRecall: cfg?.autoRecall,

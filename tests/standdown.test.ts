@@ -193,3 +193,31 @@ test("host session DOES retire a previous host instance (handshake intact)", asy
 	g.__piHindsightDispose?.();
 	delete g.__piHindsightDispose;
 });
+
+test("before_agent_start from a custom message (pi 1.4) neither crashes nor recalls", async () => {
+	delete g.__piHindsightDispose;
+	const pi = fakePi();
+	factory(pi.api as never);
+	const { ctx } = fakeCtx(tmpCwd, undefined);
+	await pi.emit("session_start", { reason: "startup" }, ctx);
+
+	// Pi 1.4 fires before_agent_start for `pi.sendMessage(..., { triggerTurn: true })`
+	// with messageType "custom" and NO `prompt` field.
+	const results = await pi.emit(
+		"before_agent_start",
+		{
+			type: "before_agent_start",
+			messageType: "custom",
+			message: { role: "custom", customType: "x", content: "hi", display: false },
+			systemPrompt: "",
+			systemPromptOptions: {},
+		},
+		ctx,
+	);
+	assert.ok(
+		results.every((r) => r === undefined),
+		"a custom-message run must not inject a recall block",
+	);
+	g.__piHindsightDispose?.();
+	delete g.__piHindsightDispose;
+});
