@@ -41,15 +41,20 @@
       "./src/index.ts"
     ]
   },
-  "dependencies": {
+  "devDependencies": {
     "@earendil-works/pi-agent-core": "^0.80.3",
     "@earendil-works/pi-ai": "^0.80.3",
     "@earendil-works/pi-coding-agent": "^0.80.3",
     "@earendil-works/pi-tui": "^0.80.3",
-    "typebox": "1.1.38"
-  },
-  "devDependencies": {
     "@types/node": "^26.0.1",
+    "typebox": "1.1.38",
     "typescript": "^6.0.3"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-agent-core": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
   }
 }
